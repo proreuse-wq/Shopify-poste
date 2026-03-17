@@ -4,7 +4,7 @@ app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Server Shopify-Poste attivo", 200
+    return "OK", 200
 
 @app.route("/shipping-rates", methods=["POST"])
 def shipping_rates():
@@ -21,6 +21,3 @@ def shipping_rates():
             }
         ]
     }), 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
