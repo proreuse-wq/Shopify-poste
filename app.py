@@ -86,7 +86,7 @@ def crea_spedizione_poste(ordine):
             "waybills": [{
                 "clientReferenceId": str(ordine.get("id", ""))[:25],
                 "printFormat": "A4",
-                "product": "APT000902",  # Standard (usa APT000901 per Express)
+                "product": "APT000901",  # Express
                 "data": {
                     "declared": [{
                         "weight": str(peso_kg * 1000),  # grammi
