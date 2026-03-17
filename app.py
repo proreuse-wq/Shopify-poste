@@ -129,6 +129,7 @@ def crea_spedizione_poste(ordine):
         result = resp.json()
 
         # Estrai numero LDV dalla risposta
+        print(f"RISPOSTA POSTE COMPLETA: {result}")
         ldv = result.get("waybills", [{}])[0].get("waybillNumber", "")
         print(f"✅ Spedizione creata! LDV: {ldv}")
         return ldv
