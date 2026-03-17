@@ -38,6 +38,25 @@ SCOPE_PRODUZIONE = "https://postemarketplace.onmicrosoft.com/d6a78063-5570-4a87-
 # ─── CACHE TOKEN ───────────────────────────────────────────────────────────────
 _token_cache = {"access_token": None, "expires_at": 0}
 
+# ─── ORDINI GIA PROCESSATI (anti-duplicati persistente) ────────────────────────
+import json
+
+ORDINI_FILE = "/tmp/ordini_processati.json"
+
+def carica_ordini():
+    try:
+        with open(ORDINI_FILE, "r") as f:
+            return set(json.load(f))
+    except:
+        return set()
+
+def salva_ordini(ordini):
+    try:
+        with open(ORDINI_FILE, "w") as f:
+            json.dump(list(ordini), f)
+    except:
+        pass
+
 
 def get_poste_token():
     """Ottieni token Poste (con cache di 1 ora)"""
@@ -84,7 +103,7 @@ def crea_spedizione_poste(ordine):
             "paperless": False,
             "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
             "waybills": [{
-                "clientReferenceId": str(ordine.get("id", ""))[:25],
+                "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
                 "printFormat": "A4",
                 "product": "APT000901",  # Express
                 "data": {
@@ -131,7 +150,7 @@ def crea_spedizione_poste(ordine):
 
         # Estrai numero LDV dalla risposta
         print(f"RISPOSTA POSTE COMPLETA: {result}")
-        ldv = result.get("waybills", [{}])[0].get("waybillNumber", "")
+        ldv = result.get("waybills", [{}])[0].get("code", "")
         print(f"✅ Spedizione creata! LDV: {ldv}")
         return ldv
 
@@ -205,6 +224,14 @@ def order_created():
     if not ordine:
         return "Bad Request", 400
 
+    ordine_id = str(ordine.get("id", ""))
+    ordini_processati = carica_ordini()
+    if ordine_id in ordini_processati:
+        print(f"⚠️ Ordine #{ordine.get('order_number', '')} già processato, ignoro duplicato")
+        return jsonify({"status": "ok", "message": "already processed"}), 200
+
+    ordini_processati.add(ordine_id)
+    salva_ordini(ordini_processati)
     print(f"📦 Nuovo ordine ricevuto: #{ordine.get('order_number', '')} - {ordine.get('email', '')}")
 
     ldv = crea_spedizione_poste(ordine)
