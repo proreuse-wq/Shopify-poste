@@ -95,7 +95,6 @@ def crea_spedizione_poste(ordine):
                         "width": "25"
                     }],
                     "content": "Merce varia",
-                    "services": {},
                     "sender": MITTENTE,
                     "receiver": {
                         "zipCode": shipping.get("zip", ""),
