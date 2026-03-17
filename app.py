@@ -5,8 +5,8 @@ import time
 app = Flask(__name__)
 
 # ─── CREDENZIALI POSTE DELIVERY BUSINESS ───────────────────────────────────────
-POSTE_CLIENT_ID = "842f24cd-7e53-43cb-8a6f-a7930afda146"   # il tuo CLIENT ID
-POSTE_SECRET_ID = "2S78Q-Z4JMyQJ1JejV0-SgYsywRUrC2ScvmOcFD"  # il tuo SECRET ID
+POSTE_CLIENT_ID = "c6e9bdd1-0e13-4060-b5bc-9f7785b50f80"   # il tuo CLIENT ID
+POSTE_SECRET_ID = "s2Y8Q~nf.QAeSDXPS5DmNUoEsCdxUupwXYn5oaCY"  # il tuo SECRET ID
 
 # Codice centro di costo
 POSTE_COST_CENTER = "CDC-00080197"
