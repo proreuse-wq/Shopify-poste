@@ -1,12 +1,13 @@
 from flask import Flask, request, jsonify
 import requests
 import time
+import os
 
 app = Flask(__name__)
 
 # ─── CREDENZIALI POSTE DELIVERY BUSINESS ───────────────────────────────────────
-POSTE_CLIENT_ID = "c6e9bdd1-0e13-4060-b5bc-9f7785b50f80"   # il tuo CLIENT ID
-POSTE_SECRET_ID = "s2Y8Q~nf.QAeSDXPS5DmNUoEsCdxUupwXYn5oaCY"  # il tuo SECRET ID
+POSTE_CLIENT_ID = os.environ.get("POSTE_CLIENT_ID", "")
+POSTE_SECRET_ID = os.environ.get("POSTE_SECRET_ID", "")
 
 # Codice centro di costo
 POSTE_COST_CENTER = "CDC-00080197"
