@@ -95,6 +95,7 @@ def crea_spedizione_poste(ordine):
                         "width": "25"
                     }],
                     "content": "Merce varia",
+                    "services": {},
                     "sender": MITTENTE,
                     "receiver": {
                         "zipCode": shipping.get("zip", ""),
@@ -117,6 +118,7 @@ def crea_spedizione_poste(ordine):
             }]
         }
 
+        print(f"PAYLOAD INVIATO A POSTE: {payload}")
         headers = {
             "POSTE_clientID": POSTE_CLIENT_ID,
             "Authorization": token,
