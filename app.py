@@ -258,7 +258,8 @@ def shipping_rates():
 
 @app.route("/webhook/order-created", methods=["POST"])
 def order_created():
-    """Vecchio webhook mantenuto per compatibilita"""    return jsonify({"status": "ok"}), 200
+    """Vecchio webhook mantenuto per compatibilita"""
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route("/webhook/order-fulfilled", methods=["POST"])
