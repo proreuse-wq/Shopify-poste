@@ -181,31 +181,42 @@ def shipping_rates():
         for item in data["rate"].get("items", []):
             peso_grammi += item.get("grams", 500) * item.get("quantity", 1)
 
-    # Tariffe basate sul peso (adatta ai tuoi prezzi contrattuali)
-    if peso_grammi <= 2000:
-        standard_price = 490   # €4.90
-        express_price = 790    # €7.90
-    elif peso_grammi <= 5000:
-        standard_price = 590
-        express_price = 990
+    peso_kg = peso_grammi / 1000
+
+    # Tariffe reali contratto Poste Delivery Business Express (a domicilio)
+    if peso_kg <= 2:
+        prezzo = 424      # €4,24
+    elif peso_kg <= 5:
+        prezzo = 499      # €4,99
+    elif peso_kg <= 10:
+        prezzo = 603      # €6,03
+    elif peso_kg <= 20:
+        prezzo = 703      # €7,03
+    elif peso_kg <= 30:
+        prezzo = 828      # €8,28
+    elif peso_kg <= 50:
+        prezzo = 1456     # €14,56
+    elif peso_kg <= 70:
+        prezzo = 1596     # €15,96
+    elif peso_kg <= 100:
+        prezzo = 1940     # €19,40
+    elif peso_kg <= 200:
+        prezzo = 1940 + 1940      # €38,80
+    elif peso_kg <= 300:
+        prezzo = 1940 + 1940 * 2  # €58,20
+    elif peso_kg <= 400:
+        prezzo = 1940 + 1940 * 3  # €77,60
+    elif peso_kg <= 500:
+        prezzo = 1940 + 1940 * 4  # €97,00
     else:
-        standard_price = 790
-        express_price = 1290
+        prezzo = 1940 + 1940 * 4  # oltre 500kg stesso prezzo
 
     return jsonify({
         "rates": [
             {
-                "service_name": "Poste Italiane Standard (4-5 giorni)",
-                "service_code": "poste_standard",
-                "total_price": str(standard_price),
-                "currency": "EUR",
-                "min_delivery_date": None,
-                "max_delivery_date": None
-            },
-            {
                 "service_name": "Poste Italiane Express (1-2 giorni)",
                 "service_code": "poste_express",
-                "total_price": str(express_price),
+                "total_price": str(prezzo),
                 "currency": "EUR",
                 "min_delivery_date": None,
                 "max_delivery_date": None
