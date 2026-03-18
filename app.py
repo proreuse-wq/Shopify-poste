@@ -167,21 +167,45 @@ def crea_spedizione_poste(ordine):
 def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
     """Aggiorna il tracking dell ordine su Shopify con il numero LDV di Poste"""
     try:
-        # Prima crea il fulfillment
-        url = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillments.json"
         headers = {
             "X-Shopify-Access-Token": SHOPIFY_TOKEN,
             "Content-Type": "application/json"
         }
+
+        # Step 1: ottieni fulfillment orders
+        url_fo = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillment_orders.json"
+        resp_fo = requests.get(url_fo, headers=headers, timeout=10)
+        resp_fo.raise_for_status()
+        fulfillment_orders = resp_fo.json().get("fulfillment_orders", [])
+
+        if not fulfillment_orders:
+            print(f"⚠️ Nessun fulfillment order trovato per ordine #{order_number}")
+            return False
+
+        # Step 2: crea fulfillment con tracking
+        line_items_by_fulfillment = [
+            {"fulfillment_order_id": fo["id"]}
+            for fo in fulfillment_orders
+            if fo.get("status") in ("open", "in_progress")
+        ]
+
+        if not line_items_by_fulfillment:
+            print(f"⚠️ Nessun fulfillment order aperto per ordine #{order_number}")
+            return False
+
+        url_f = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments.json"
         payload = {
             "fulfillment": {
-                "tracking_company": "Poste Italiane",
-                "tracking_number": ldv,
-                "tracking_url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}",
+                "line_items_by_fulfillment_order": line_items_by_fulfillment,
+                "tracking_info": {
+                    "company": "Poste Italiane",
+                    "number": ldv,
+                    "url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}"
+                },
                 "notify_customer": True
             }
         }
-        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        resp = requests.post(url_f, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
         print(f"✅ Tracking aggiornato su Shopify per ordine #{order_number}: {ldv}")
         return True
