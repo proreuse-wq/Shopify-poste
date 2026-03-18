@@ -35,6 +35,11 @@ AUTH_URL = "https://apiw.gp.posteitaliane.it/gp/internet/user/sessions"
 WAYBILL_URL = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/waybill"
 SCOPE_PRODUZIONE = "https://postemarketplace.onmicrosoft.com/d6a78063-5570-4a87-bbd7-07326e6855d1/.default"
 
+# ─── CREDENZIALI SHOPIFY ───────────────────────────────────────────────────────
+SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN", "")
+SHOPIFY_SHOP = os.environ.get("SHOPIFY_SHOP", "")
+SHOPIFY_API_VERSION = "2026-01"
+
 # ─── CACHE TOKEN ───────────────────────────────────────────────────────────────
 _token_cache = {"access_token": None, "expires_at": 0}
 
@@ -159,6 +164,32 @@ def crea_spedizione_poste(ordine):
         return None
 
 
+def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
+    """Aggiorna il tracking dell ordine su Shopify con il numero LDV di Poste"""
+    try:
+        # Prima crea il fulfillment
+        url = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillments.json"
+        headers = {
+            "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "fulfillment": {
+                "tracking_company": "Poste Italiane",
+                "tracking_number": ldv,
+                "tracking_url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}",
+                "notify_customer": True
+            }
+        }
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        print(f"✅ Tracking aggiornato su Shopify per ordine #{order_number}: {ldv}")
+        return True
+    except Exception as e:
+        print(f"❌ Errore aggiornamento tracking Shopify: {e}")
+        return False
+
+
 # ─── ROUTE SHOPIFY ─────────────────────────────────────────────────────────────
 
 @app.route("/")
@@ -227,27 +258,35 @@ def shipping_rates():
 
 @app.route("/webhook/order-created", methods=["POST"])
 def order_created():
+    """Vecchio webhook mantenuto per compatibilita"""    return jsonify({"status": "ok"}), 200
+
+
+@app.route("/webhook/order-fulfilled", methods=["POST"])
+def order_fulfilled():
     """
-    Webhook chiamato da Shopify quando viene creato un nuovo ordine.
-    Crea automaticamente la spedizione su Poste Delivery Business.
+    Webhook chiamato da Shopify quando un ordine viene evaso.
+    Crea la spedizione su Poste e aggiorna il tracking su Shopify.
     """
     ordine = request.get_json(silent=True)
     if not ordine:
         return "Bad Request", 400
 
     ordine_id = str(ordine.get("id", ""))
+    order_number = ordine.get("order_number", "")
+
     ordini_processati = carica_ordini()
     if ordine_id in ordini_processati:
-        print(f"⚠️ Ordine #{ordine.get('order_number', '')} già processato, ignoro duplicato")
+        print(f"⚠️ Ordine #{order_number} già processato, ignoro duplicato")
         return jsonify({"status": "ok", "message": "already processed"}), 200
 
     ordini_processati.add(ordine_id)
     salva_ordini(ordini_processati)
-    print(f"📦 Nuovo ordine ricevuto: #{ordine.get('order_number', '')} - {ordine.get('email', '')}")
+    print(f"📦 Ordine evaso: #{order_number} - {ordine.get('email', '')}")
 
     ldv = crea_spedizione_poste(ordine)
 
     if ldv:
+        aggiorna_tracking_shopify(ordine_id, order_number, ldv)
         return jsonify({"status": "ok", "ldv": ldv}), 200
     else:
         return jsonify({"status": "error", "message": "Errore creazione spedizione"}), 500
