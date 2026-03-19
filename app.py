@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 import time
 import os
+import json
 
 app = Flask(__name__)
 
@@ -24,7 +25,7 @@ MITTENTE = {
     "contactName": "PROREUSE SRLS",
     "province": "TO",
     "email": "proreuse1622@gmail.com",
-    "phone": "",        # <-- aggiungi il tuo telefono se vuoi
+    "phone": "",
     "cellphone": "",
     "note1": "",
     "note2": ""
@@ -33,6 +34,7 @@ MITTENTE = {
 # ─── URL API POSTE ──────────────────────────────────────────────────────────────
 AUTH_URL = "https://apiw.gp.posteitaliane.it/gp/internet/user/sessions"
 WAYBILL_URL = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/waybill"
+TRACKING_URL = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/tracking"
 SCOPE_PRODUZIONE = "https://postemarketplace.onmicrosoft.com/d6a78063-5570-4a87-bbd7-07326e6855d1/.default"
 
 # ─── CREDENZIALI SHOPIFY ───────────────────────────────────────────────────────
@@ -43,9 +45,7 @@ SHOPIFY_API_VERSION = "2026-01"
 # ─── CACHE TOKEN ───────────────────────────────────────────────────────────────
 _token_cache = {"access_token": None, "expires_at": 0}
 
-# ─── ORDINI GIA PROCESSATI (anti-duplicati persistente) ────────────────────────
-import json
-
+# ─── ANTI-DUPLICATI PERSISTENTE ────────────────────────────────────────────────
 ORDINI_FILE = "/tmp/ordini_processati.json"
 
 def carica_ordini():
@@ -64,11 +64,9 @@ def salva_ordini(ordini):
 
 
 def get_poste_token():
-    """Ottieni token Poste (con cache di 1 ora)"""
     now = time.time()
     if _token_cache["access_token"] and now < _token_cache["expires_at"] - 60:
         return _token_cache["access_token"]
-
     payload = {
         "clientId": POSTE_CLIENT_ID,
         "secretId": POSTE_SECRET_ID,
@@ -76,44 +74,34 @@ def get_poste_token():
         "grantType": "client_credentials"
     }
     headers = {"POSTE_clientID": POSTE_CLIENT_ID, "Content-Type": "application/json"}
-
     resp = requests.post(AUTH_URL, json=payload, headers=headers, timeout=10)
     resp.raise_for_status()
     data = resp.json()
-
     _token_cache["access_token"] = data["access_token"]
     _token_cache["expires_at"] = now + data.get("expires_in", 3599)
-
     return _token_cache["access_token"]
 
 
-def crea_spedizione_poste(ordine):
-    """
-    Crea una spedizione su Poste Delivery Business.
-    ordine: dict con i dati dell'ordine Shopify (shipping_address, peso, ecc.)
-    Ritorna il numero LDV o None in caso di errore.
-    """
+def crea_spedizione_poste(ordine, paperless=True):
     try:
         token = get_poste_token()
-
         shipping = ordine.get("shipping_address", {})
         peso_grammi = sum(
             item.get("grams", 500) * item.get("quantity", 1)
             for item in ordine.get("line_items", [])
         )
         peso_kg = max(1, round(peso_grammi / 1000))
-
         payload = {
             "costCenterCode": POSTE_COST_CENTER,
-            "paperless": False,
+            "paperless": paperless,
             "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
             "waybills": [{
                 "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
                 "printFormat": "A4",
-                "product": "APT000901",  # Express
+                "product": "APT000901",
                 "data": {
                     "declared": [{
-                        "weight": str(peso_kg * 1000),  # grammi
+                        "weight": str(peso_kg * 1000),
                         "height": "10",
                         "length": "30",
                         "width": "25"
@@ -141,58 +129,77 @@ def crea_spedizione_poste(ordine):
                 }
             }]
         }
-
-        print(f"PAYLOAD INVIATO A POSTE: {payload}")
         headers = {
             "POSTE_clientID": POSTE_CLIENT_ID,
             "Authorization": token,
             "Content-Type": "application/json"
         }
-
         resp = requests.post(WAYBILL_URL, json=payload, headers=headers, timeout=15)
         resp.raise_for_status()
         result = resp.json()
-
-        # Estrai numero LDV dalla risposta
-        print(f"RISPOSTA POSTE COMPLETA: {result}")
+        print(f"RISPOSTA POSTE: {result}")
         ldv = result.get("waybills", [{}])[0].get("code", "")
-        print(f"✅ Spedizione creata! LDV: {ldv}")
+        modo = "BOZZA" if paperless else "con etichetta"
+        print(f"Spedizione creata {modo}! LDV: {ldv}")
         return ldv
-
     except Exception as e:
-        print(f"❌ Errore creazione spedizione Poste: {e}")
+        print(f"Errore creazione spedizione Poste: {e}")
+        return None
+
+
+def get_tracking_poste(ldv):
+    try:
+        token = get_poste_token()
+        payload = {
+            "arg0": {
+                "shipmentsData": [{"waybillNumber": ldv, "lastTracingState": "S"}],
+                "statusDescription": "E",
+                "customerType": "DQ"
+            }
+        }
+        headers = {
+            "POSTE_clientID": POSTE_CLIENT_ID,
+            "Authorization": token,
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(TRACKING_URL, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        result = resp.json()
+        shipment = result.get("return", {}).get("messages", [{}])[0]
+        tracking_events = shipment.get("tracking", [])
+        if tracking_events:
+            ultimo = tracking_events[-1]
+            stato = ultimo.get("statusDescription", "")
+            data = ultimo.get("data", "")
+            print(f"Tracking {ldv}: {stato} ({data})")
+            return stato
+        return None
+    except Exception as e:
+        print(f"Errore tracking Poste: {e}")
         return None
 
 
 def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
-    """Aggiorna il tracking dell ordine su Shopify con il numero LDV di Poste"""
     try:
         headers = {
             "X-Shopify-Access-Token": SHOPIFY_TOKEN,
             "Content-Type": "application/json"
         }
-
-        # Step 1: ottieni fulfillment orders
         url_fo = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillment_orders.json"
         resp_fo = requests.get(url_fo, headers=headers, timeout=10)
         resp_fo.raise_for_status()
         fulfillment_orders = resp_fo.json().get("fulfillment_orders", [])
-
         if not fulfillment_orders:
-            print(f"⚠️ Nessun fulfillment order trovato per ordine #{order_number}")
+            print(f"Nessun fulfillment order per ordine #{order_number}")
             return False
-
-        # Step 2: crea fulfillment con tracking
         line_items_by_fulfillment = [
             {"fulfillment_order_id": fo["id"]}
             for fo in fulfillment_orders
             if fo.get("status") in ("open", "in_progress")
         ]
-
         if not line_items_by_fulfillment:
-            print(f"⚠️ Nessun fulfillment order aperto per ordine #{order_number}")
+            print(f"Nessun fulfillment order aperto per ordine #{order_number}")
             return False
-
         url_f = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments.json"
         payload = {
             "fulfillment": {
@@ -207,14 +214,14 @@ def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
         }
         resp = requests.post(url_f, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
-        print(f"✅ Tracking aggiornato su Shopify per ordine #{order_number}: {ldv}")
+        print(f"Tracking aggiornato su Shopify per ordine #{order_number}: {ldv}")
         return True
     except Exception as e:
-        print(f"❌ Errore aggiornamento tracking Shopify: {e}")
+        print(f"Errore aggiornamento tracking Shopify: {e}")
         return False
 
 
-# ─── ROUTE SHOPIFY ─────────────────────────────────────────────────────────────
+# ─── ROUTE ─────────────────────────────────────────────────────────────────────
 
 @app.route("/")
 def home():
@@ -223,75 +230,68 @@ def home():
 
 @app.route("/shipping-rates", methods=["POST"])
 def shipping_rates():
-    """
-    Endpoint chiamato da Shopify al checkout per mostrare le tariffe di spedizione.
-    Restituisce tariffe fisse basate sul peso dell'ordine.
-    """
     data = request.get_json(silent=True)
-    print("SHOPIFY RATES REQUEST:", data)
-
-    # Calcola peso totale in grammi
     peso_grammi = 0
     if data and "rate" in data:
         for item in data["rate"].get("items", []):
             peso_grammi += item.get("grams", 500) * item.get("quantity", 1)
-
     peso_kg = peso_grammi / 1000
 
-    # Tariffe reali contratto Poste Delivery Business Express (a domicilio)
     if peso_kg <= 2:
-        prezzo = 424      # €4,24
+        prezzo = 430
     elif peso_kg <= 5:
-        prezzo = 499      # €4,99
+        prezzo = 500
     elif peso_kg <= 10:
-        prezzo = 603      # €6,03
+        prezzo = 600
     elif peso_kg <= 20:
-        prezzo = 703      # €7,03
+        prezzo = 700
     elif peso_kg <= 30:
-        prezzo = 828      # €8,28
+        prezzo = 830
     elif peso_kg <= 50:
-        prezzo = 1456     # €14,56
+        prezzo = 1460
     elif peso_kg <= 70:
-        prezzo = 1596     # €15,96
+        prezzo = 1600
     elif peso_kg <= 100:
-        prezzo = 1940     # €19,40
+        prezzo = 1940
     elif peso_kg <= 200:
-        prezzo = 1940 + 1940      # €38,80
+        prezzo = 3880
     elif peso_kg <= 300:
-        prezzo = 1940 + 1940 * 2  # €58,20
+        prezzo = 5820
     elif peso_kg <= 400:
-        prezzo = 1940 + 1940 * 3  # €77,60
+        prezzo = 7760
     elif peso_kg <= 500:
-        prezzo = 1940 + 1940 * 4  # €97,00
+        prezzo = 9700
     else:
-        prezzo = 1940 + 1940 * 4  # oltre 500kg stesso prezzo
+        prezzo = 9700
 
     return jsonify({
-        "rates": [
-            {
-                "service_name": "Poste Italiane Express (1-2 giorni)",
-                "service_code": "poste_express",
-                "total_price": str(prezzo),
-                "currency": "EUR",
-                "min_delivery_date": None,
-                "max_delivery_date": None
-            }
-        ]
+        "rates": [{
+            "service_name": "Poste Italiane Express (1-2 giorni)",
+            "service_code": "poste_express",
+            "total_price": str(prezzo),
+            "currency": "EUR",
+            "min_delivery_date": None,
+            "max_delivery_date": None
+        }]
     }), 200
+
+
+@app.route("/tracking/<ldv>", methods=["GET"])
+def tracking(ldv):
+    stato = get_tracking_poste(ldv)
+    if stato:
+        return jsonify({"ldv": ldv, "stato": stato}), 200
+    else:
+        return jsonify({"error": "Tracking non disponibile"}), 404
 
 
 @app.route("/webhook/order-created", methods=["POST"])
 def order_created():
-    """Vecchio webhook mantenuto per compatibilita"""
     return jsonify({"status": "ok"}), 200
 
 
 @app.route("/webhook/order-fulfilled", methods=["POST"])
 def order_fulfilled():
-    """
-    Webhook chiamato da Shopify quando un ordine viene evaso.
-    Crea la spedizione su Poste e aggiorna il tracking su Shopify.
-    """
     ordine = request.get_json(silent=True)
     if not ordine:
         return "Bad Request", 400
@@ -301,14 +301,14 @@ def order_fulfilled():
 
     ordini_processati = carica_ordini()
     if ordine_id in ordini_processati:
-        print(f"⚠️ Ordine #{order_number} già processato, ignoro duplicato")
+        print(f"Ordine #{order_number} gia processato, ignoro duplicato")
         return jsonify({"status": "ok", "message": "already processed"}), 200
 
     ordini_processati.add(ordine_id)
     salva_ordini(ordini_processati)
-    print(f"📦 Ordine evaso: #{order_number} - {ordine.get('email', '')}")
+    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')}")
 
-    ldv = crea_spedizione_poste(ordine)
+    ldv = crea_spedizione_poste(ordine, paperless=True)
 
     if ldv:
         aggiorna_tracking_shopify(ordine_id, order_number, ldv)
