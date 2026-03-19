@@ -308,7 +308,7 @@ def order_fulfilled():
     salva_ordini(ordini_processati)
     print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')}")
 
-    ldv = crea_spedizione_poste(ordine, paperless=True)
+    ldv = crea_spedizione_poste(ordine, paperless=False)
 
     if ldv:
         aggiorna_tracking_shopify(ordine_id, order_number, ldv)
