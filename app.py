@@ -421,7 +421,15 @@ def order_fulfilled():
 
     ordini_processati.add(ordine_id)
     salva_ordini(ordini_processati)
-    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')}")
+    shipping = ordine.get("shipping_address", {})
+    paese = shipping.get("country_code", "IT").upper()
+
+    # Controlla se il paese è gestito da Poste
+    if paese != "IT" and paese not in PAESE_ZONA:
+        print(f"Paese {paese} non gestito da Poste, ignoro")
+        return jsonify({"status": "ok", "message": "paese non gestito da Poste"}), 200
+
+    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - {paese}")
 
     ldv = crea_spedizione_poste(ordine, paperless=False)
 
