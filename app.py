@@ -63,6 +63,34 @@ PAESE_ZONA = {
     "GB": 10,
 }
 
+
+# ─── MAPPA ISO2 → ISO4 (formato Poste) ────────────────────────────────────────
+ISO2_TO_ISO4 = {
+    "AT": "AUT1", "BE": "BEL1", "BG": "BGR1", "HR": "HRV1",
+    "CY": "CYP1", "CZ": "CZE1", "DK": "DNK1", "EE": "EST1",
+    "FI": "FIN1", "FR": "FRA1", "DE": "DEU1", "GR": "GRC1",
+    "HU": "HUN1", "IE": "IRL1", "IT": "ITA1", "LV": "LVA1",
+    "LT": "LTU1", "LU": "LUX1", "MT": "MLT1", "NL": "NLD1",
+    "PL": "POL1", "PT": "PRT1", "RO": "ROU1", "SK": "SVK1",
+    "SI": "SVN1", "ES": "ESP1", "SE": "SWE1", "GB": "GBR1",
+    "NO": "NOR1", "CH": "CHE1", "LI": "LIE1", "MC": "MCO1",
+}
+
+
+# ─── MAPPA ISO2 → ISO4 PER POSTE ───────────────────────────────────────────────
+ISO2_TO_ISO4 = {
+    "DE": "DEU1", "NL": "NLD1", "PL": "POL1", "EE": "EST1",
+    "LV": "LVA1", "LT": "LTU1", "LI": "LIE1",
+    "AT": "AUT1", "BE": "BEL1", "DK": "DNK1", "FR": "FRA1",
+    "FI": "FIN1", "LU": "LUX1", "SE": "SWE1", "PT": "PRT1",
+    "CZ": "CZE1", "RO": "ROU1", "SK": "SVK1", "SI": "SVN1",
+    "ES": "ESP1", "HU": "HUN1", "MC": "MCO1",
+    "BG": "BGR1", "HR": "HRV1", "GR": "GRC1", "MT": "MLT1",
+    "NO": "NOR1", "CH": "CHE1",
+    "CY": "CYP1", "IE": "IRL1",
+    "GB": "GBR1",
+}
+
 # ─── TARIFFE INTERNAZIONALI HD (centesimi) ─────────────────────────────────────
 # Prezzo per fascia di peso (uso il prezzo del kg massimo della fascia)
 # Fasce: 0-5, 5-10, 10-15, 15-20, 20-25, 25-30
@@ -98,7 +126,7 @@ def calcola_prezzo_internazionale(zona, peso_kg):
 
     if peso_intero <= 30:
         return TARIFFE_KG[zona][peso_intero - 1]
-    elif peso_intero <= 300:
+    elif peso_intero <= 500:
         base30 = TARIFFE_KG[zona][29]
         per_kg = TARIFFA_PER_KG[zona]
         kg_eccedenti = peso_intero - 30
@@ -108,7 +136,7 @@ def calcola_prezzo_internazionale(zona, peso_kg):
     else:
         base30 = TARIFFE_KG[zona][29]
         per_kg = TARIFFA_PER_KG[zona]
-        return base30 + 270 * per_kg
+        return base30 + 470 * per_kg
 
 
 # ─── TARIFFE ITALIA (centesimi) ────────────────────────────────────────────────
@@ -179,8 +207,7 @@ def crea_spedizione_poste(ordine, paperless=False):
             country_name = "Italia"
         else:
             product_code = "APT001013"  # International Plus
-            # Codice paese ISO per Poste internazionale
-            country_code = paese
+            country_code = ISO2_TO_ISO4.get(paese, paese + "1")
             country_name = shipping.get("country", "")
 
         payload = {
