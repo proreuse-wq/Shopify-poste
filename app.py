@@ -240,7 +240,8 @@ def crea_spedizione_poste(ordine, paperless=False):
                         "email": ordine.get("email", ""),
                         "phone": shipping.get("phone", ""),
                         "cellphone": "", "note1": "", "note2": ""
-                    }
+                    },
+                    "international": {"receiverType": "retailDelivery"} if paese != "IT" else None
                 }
             }]
         }
