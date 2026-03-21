@@ -68,86 +68,47 @@ PAESE_ZONA = {
 # Fasce: 0-5, 5-10, 10-15, 15-20, 20-25, 25-30
 # Oltre 30: prezzo 30kg + (kg eccedenti * tariffa_al_kg)
 
-TARIFFE_INT = {
-    1: {
-        "fasce": [
-            (5,   1260),   # 0-5kg → €12,60
-            (10,  1638),   # 5-10kg → €16,38
-            (15,  2270),   # 10-15kg → €22,70
-            (20,  2650),   # 15-20kg → €26,50
-            (25,  3150),   # 20-25kg → €31,50
-            (30,  3700),   # 25-30kg → €37,00
-        ],
-        "base30": 3700,    # €37,00
-        "per_kg": 66,      # €0,66 per kg oltre 30
-    },
-    2: {
-        "fasce": [
-            (5,   1355),
-            (10,  1775),
-            (15,  2528),
-            (20,  3012),
-            (25,  3496),
-            (30,  3926),
-        ],
-        "base30": 3926,
-        "per_kg": 70,
-    },
-    3: {
-        "fasce": [
-            (5,   2055),
-            (10,  2715),
-            (15,  3465),
-            (20,  4030),
-            (25,  4595),
-            (30,  5165),
-        ],
-        "base30": 5165,
-        "per_kg": 77,
-    },
-    4: {
-        "fasce": [
-            (5,   2501),
-            (10,  3387),
-            (15,  3933),
-            (20,  4348),
-            (25,  4839),
-            (30,  5331),
-        ],
-        "base30": 5331,
-        "per_kg": 166,
-    },
-    10: {
-        "fasce": [
-            (5,   2028),
-            (10,  2406),
-            (15,  2874),
-            (20,  3252),
-            (25,  3961),
-            (30,  4501),
-        ],
-        "base30": 4501,
-        "per_kg": 70,
-    },
+# Prezzi esatti kg per kg (HD = a domicilio) in centesimi
+TARIFFE_KG = {
+    1: [910,1120,1150,1240,1260,1362,1426,1472,1518,1638,
+        1739,1850,1980,2100,2270,2320,2450,2530,2590,2650,
+        2690,2780,2900,3080,3150,3320,3450,3550,3620,3700],
+    2: [993,1119,1129,1334,1355,1549,1570,1603,1667,1775,
+        2098,2205,2313,2420,2528,2829,2904,2947,2990,3012,
+        3227,3335,3388,3442,3496,3603,3716,3786,3856,3926],
+    3: [1555,1665,1750,1885,2055,2210,2310,2415,2515,2715,
+        3010,3125,3235,3350,3465,3575,3690,3805,3915,4030,
+        4145,4255,4370,4485,4595,4710,4825,4935,5050,5165],
+    4: [1737,1901,2065,2469,2501,2633,2829,3048,3157,3387,
+        3627,3703,3769,3867,3933,3955,4053,4151,4250,4348,
+        4446,4544,4643,4741,4839,4938,5036,5134,5233,5331],
+    10: [1440,1716,1812,1932,2028,2064,2136,2256,2340,2406,
+         2592,2664,2730,2802,2874,2940,3012,3060,3150,3252,
+         3529,3661,3841,3937,3961,3985,4201,4273,4381,4501],
 }
+
+TARIFFA_PER_KG = {1: 66, 2: 70, 3: 77, 4: 166, 10: 70}
 
 def calcola_prezzo_internazionale(zona, peso_kg):
     """Calcola il prezzo per spedizione internazionale in centesimi"""
-    if zona not in TARIFFE_INT:
+    if zona not in TARIFFE_KG:
         return None
 
-    t = TARIFFE_INT[zona]
+    peso_intero = max(1, int(peso_kg) if peso_kg == int(peso_kg) else int(peso_kg) + 1)
 
-    if peso_kg <= 30:
-        for (limite, prezzo) in t["fasce"]:
-            if peso_kg <= limite:
-                return prezzo
-        return t["base30"]
+    if peso_intero <= 30:
+        return TARIFFE_KG[zona][peso_intero - 1]
+    elif peso_intero <= 300:
+        base30 = TARIFFE_KG[zona][29]
+        per_kg = TARIFFA_PER_KG[zona]
+        kg_eccedenti = peso_intero - 30
+        # Arrotonda a fascia di 5kg
+        fascia = ((kg_eccedenti - 1) // 5 + 1) * 5
+        return base30 + fascia * per_kg
     else:
-        # Oltre 30kg: fascia di 5 in 5 fino a 300kg
-        kg_eccedenti = peso_kg - 30
-        prezzo = t["base30"] + int(kg_eccedenti * t["per_kg"])
-        return prezzo
+        base30 = TARIFFE_KG[zona][29]
+        per_kg = TARIFFA_PER_KG[zona]
+        return base30 + 270 * per_kg
 
 
 # ─── TARIFFE ITALIA (centesimi) ────────────────────────────────────────────────
