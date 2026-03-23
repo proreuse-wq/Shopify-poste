@@ -1,522 +1,207 @@
-from __future__ import annotations
-
-"""
-/app.py
-
-Shopify → Poste Delivery Business integration (Railway-ready).
-
-Key fixes for International Plus (APT001013):
-- Never send `data.services` (Poste rejects it for international if empty/nonconforming).
-- Never send `items[].description` (field not allowed for APT001013 items).
-- `international.contentCode` is parsed from `international/nation/details` under `carriers.*.content`.
-- `data.description` is mandatory for international; also duplicated at `waybill.description` for safety.
-- Fail fast if `contentCode` cannot be determined (returns "999").
-"""
-
-import json
-import math
-import os
-import time
-from typing import Any, Dict, List, Optional
-
+from flask import Flask, request, jsonify
 import requests
-from flask import Flask, jsonify, request
+import time
+import os
+import json
 
 app = Flask(__name__)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ENV
-# ──────────────────────────────────────────────────────────────────────────────
+# ─── CREDENZIALI POSTE ─────────────────────────────────────────────────────────
 POSTE_CLIENT_ID = os.environ.get("POSTE_CLIENT_ID", "")
 POSTE_SECRET_ID = os.environ.get("POSTE_SECRET_ID", "")
-POSTE_COST_CENTER = os.environ.get("POSTE_COST_CENTER", "CDC-00080197")
-POSTE_CONTRACT_CODE = os.environ.get("POSTE_CONTRACT_CODE", "")  # optional
-POSTE_PACKAGING_CODE = os.environ.get("POSTE_PACKAGING_CODE", "CC")
-POSTE_INTL_DESCRIPTION = os.environ.get("POSTE_INTL_DESCRIPTION", "Merce generica")
-
-SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN", "")
-SHOPIFY_SHOP = os.environ.get("SHOPIFY_SHOP", "")
-SHOPIFY_API_VERSION = os.environ.get("SHOPIFY_API_VERSION", "2024-04")
-
-# optional overrides
-POSTE_INTL_CONTENT_CODE = os.environ.get("POSTE_INTL_CONTENT_CODE", "")  # set to force a specific contentCode
-POSTE_TARIC = os.environ.get("POSTE_TARIC", "2313200310")
-POSTE_ORIGIN_COUNTRY = os.environ.get("POSTE_ORIGIN_COUNTRY", "IT")
+POSTE_COST_CENTER = "CDC-00080197"
 
 MITTENTE = {
-    "zipCode": os.environ.get("MITTENTE_ZIP", "10070"),
-    "streetNumber": os.environ.get("MITTENTE_STREET_NUMBER", "30"),
-    "city": os.environ.get("MITTENTE_CITY", "VALLO TORINESE"),
-    "address": os.environ.get("MITTENTE_ADDRESS", "Via Torino"),
-    "country": "ITA1",
-    "countryName": "Italia",
-    "nameSurname": os.environ.get("MITTENTE_NAME", "PROREUSE SRLS"),
-    "contactName": os.environ.get("MITTENTE_CONTACT", "PROREUSE SRLS"),
-    "province": os.environ.get("MITTENTE_PROVINCE", "TO"),
-    "email": os.environ.get("MITTENTE_EMAIL", "proreuse1622@gmail.com"),
-    "phone": os.environ.get("MITTENTE_PHONE") or os.environ.get("POSTE_SENDER_PHONE") or "+393711998531",
-    "cellphone": os.environ.get("MITTENTE_CELLPHONE", ""),
-    "note1": "",
-    "note2": "",
+    "zipCode": "10070", "streetNumber": "30", "city": "VALLO TORINESE",
+    "address": "Via Torino", "country": "ITA1", "countryName": "Italia",
+    "nameSurname": "PROREUSE SRLS", "contactName": "PROREUSE SRLS",
+    "province": "TO", "email": "proreuse1622@gmail.com",
+    "phone": "", "cellphone": "", "note1": "", "note2": ""
 }
 
 AUTH_URL = "https://apiw.gp.posteitaliane.it/gp/internet/user/sessions"
 WAYBILL_URL = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/waybill"
 TRACKING_URL = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/tracking"
-INTERNATIONAL_NATIONS_URL = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/international/nations"
-INTERNATIONAL_NATION_DETAILS_URL = (
-    "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/international/nation/details"
-)
-WAYBILL_SERVICES_URL = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/waybill/services"
-
 SCOPE_PRODUZIONE = "https://postemarketplace.onmicrosoft.com/d6a78063-5570-4a87-bbd7-07326e6855d1/.default"
 
+# ─── CREDENZIALI SHOPIFY ───────────────────────────────────────────────────────
+SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN", "")
+SHOPIFY_SHOP = os.environ.get("SHOPIFY_SHOP", "")
+SHOPIFY_API_VERSION = "2026-01"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ──────────────────────────────────────────────────────────────────────────────
-def log_debug(*args: Any) -> None:
+# ─── CACHE TOKEN ───────────────────────────────────────────────────────────────
+_token_cache = {"access_token": None, "expires_at": 0}
+
+ORDINI_FILE = "/tmp/ordini_processati.json"
+
+def carica_ordini():
     try:
-        print(*args)
-    except Exception:
+        with open(ORDINI_FILE, "r") as f:
+            return set(json.load(f))
+    except:
+        return set()
+
+def salva_ordini(ordini):
+    try:
+        with open(ORDINI_FILE, "w") as f:
+            json.dump(list(ordini), f)
+    except:
         pass
 
-
-def is_blank(value: Any) -> bool:
-    return value is None or str(value).strip() == ""
-
-
-def clean_text(value: Any, max_len: int = 0, upper: bool = False) -> str:
-    s = "" if value is None else str(value).strip()
-    if upper:
-        s = s.upper()
-    if max_len and len(s) > max_len:
-        s = s[:max_len]
-    return s
-
-
-def digits_only(value: Any, plus_allowed: bool = False, max_len: int = 0) -> str:
-    s = clean_text(value)
-    prefix = ""
-    if plus_allowed and s.startswith("+"):
-        prefix = "+"
-        s = s[1:]
-    out = prefix + "".join(ch for ch in s if ch.isdigit())
-    if max_len and len(out) > max_len:
-        out = out[:max_len]
-    return out
-
-
-def round_up_kg_from_grams(grams: int) -> float:
-    return math.ceil((grams / 1000.0) * 100) / 100.0
-
-
-def get_order_weight_grams(order: Dict[str, Any]) -> int:
-    total = 0
-    for li in order.get("line_items", []) or []:
-        grams = int(li.get("grams") or 0)
-        qty = int(li.get("quantity") or 0)
-        total += grams * qty
-    return total if total > 0 else 100
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# POSTE AUTH
-# ──────────────────────────────────────────────────────────────────────────────
-_token_cache: Dict[str, Any] = {"token": None, "exp": 0}
-
-
-def poste_token() -> str:
-    now = int(time.time())
-    if _token_cache.get("token") and now < int(_token_cache.get("exp", 0)) - 60:
-        return str(_token_cache["token"])
-
-    headers = {"Content-Type": "application/x-www-form-urlencoded"}
-    data = {
-        "grant_type": "client_credentials",
-        "client_id": POSTE_CLIENT_ID,
-        "client_secret": POSTE_SECRET_ID,
-        "scope": SCOPE_PRODUZIONE,
-    }
-    resp = requests.post(AUTH_URL, data=data, headers=headers, timeout=30)
-    resp.raise_for_status()
-    payload = resp.json() or {}
-    token = payload.get("access_token")
-    expires_in = int(payload.get("expires_in", 3600))
-    if not token:
-        raise RuntimeError("Token Poste non ottenuto")
-    _token_cache["token"] = token
-    _token_cache["exp"] = now + expires_in
-    return str(token)
-
-
-def poste_headers() -> Dict[str, str]:
-    return {"Authorization": f"Bearer {poste_token()}", "Content-Type": "application/json"}
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# INTERNATIONAL LOOKUPS (cached)
-# ──────────────────────────────────────────────────────────────────────────────
-ISO2_TO_ISO4 = {
-    "IT": "ITA1",
-    "DE": "GER1",
-    "FR": "FRA1",
-    "ES": "ESP1",
-    "NL": "NLD1",
-    "BE": "BEL1",
-    "AT": "AUT1",
-    "PT": "PRT1",
-    "PL": "POL1",
-    "SE": "SWE1",
-    "DK": "DNK1",
-    "FI": "FIN1",
-    "IE": "IRL1",
-    "CZ": "CZE1",
-    "SK": "SVK1",
-    "HU": "HUN1",
-    "RO": "ROU1",
-    "BG": "BGR1",
-    "HR": "HRV1",
-    "SI": "SVN1",
-    "LT": "LTU1",
-    "LV": "LVA1",
-    "EE": "EST1",
-    "LU": "LUX1",
-    "MT": "MLT1",
-    "CY": "CYP1",
-    "GR": "GRC1",
+# ─── MAPPA PAESI → ZONA ────────────────────────────────────────────────────────
+PAESE_ZONA = {
+    "DE": 1, "NL": 1, "PL": 1, "EE": 1, "LV": 1, "LT": 1, "LI": 1,
+    "AT": 2, "BE": 2, "DK": 2, "FR": 2, "FI": 2, "LU": 2, "SE": 2,
+    "PT": 2, "CZ": 2, "RO": 2, "SK": 2, "SI": 2, "ES": 2, "HU": 2, "MC": 2,
+    "BG": 3, "HR": 3, "GR": 3, "MT": 3, "NO": 3, "CH": 3,
+    "CY": 4, "IE": 4,
+    "GB": 10,
 }
 
-_nations_cache: Dict[str, Any] = {"at": 0, "data": []}
-_details_cache: Dict[str, Any] = {}
+# ─── TARIFFE INTERNAZIONALI (centesimi) ────────────────────────────────────────
+TARIFFE_KG = {
+    1: [910,1120,1150,1240,1260,1362,1426,1472,1518,1638,
+        1739,1850,1980,2100,2270,2320,2450,2530,2590,2650,
+        2690,2780,2900,3080,3150,3320,3450,3550,3620,3700],
+    2: [993,1119,1129,1334,1355,1549,1570,1603,1667,1775,
+        2098,2205,2313,2420,2528,2829,2904,2947,2990,3012,
+        3227,3335,3388,3442,3496,3603,3716,3786,3856,3926],
+    3: [1555,1665,1750,1885,2055,2210,2310,2415,2515,2715,
+        3010,3125,3235,3350,3465,3575,3690,3805,3915,4030,
+        4145,4255,4370,4485,4595,4710,4825,4935,5050,5165],
+    4: [1737,1901,2065,2469,2501,2633,2829,3048,3157,3387,
+        3627,3703,3769,3867,3933,3955,4053,4151,4250,4348,
+        4446,4544,4643,4741,4839,4938,5036,5134,5233,5331],
+    10: [1440,1716,1812,1932,2028,2064,2136,2256,2340,2406,
+         2592,2664,2730,2802,2874,2940,3012,3060,3150,3252,
+         3529,3661,3841,3937,3961,3985,4201,4273,4381,4501],
+}
+TARIFFA_PER_KG = {1: 66, 2: 70, 3: 77, 4: 166, 10: 70}
 
 
-def get_international_nations(force: bool = False) -> List[Dict[str, Any]]:
-    now = int(time.time())
-    if not force and _nations_cache["data"] and now - int(_nations_cache["at"]) < 6 * 3600:
-        return list(_nations_cache["data"])
+def calcola_prezzo_internazionale(zona, peso_kg):
+    if zona not in TARIFFE_KG:
+        return None
+    peso_intero = max(1, int(peso_kg) if peso_kg == int(peso_kg) else int(peso_kg) + 1)
+    if peso_intero <= 30:
+        return TARIFFE_KG[zona][peso_intero - 1]
+    if peso_intero <= 500:
+        base30 = TARIFFE_KG[zona][29]
+        per_kg = TARIFFA_PER_KG[zona]
+        kg_eccedenti = peso_intero - 30
+        fascia = ((kg_eccedenti - 1) // 5 + 1) * 5
+        return base30 + fascia * per_kg
+    base30 = TARIFFE_KG[zona][29]
+    return base30 + 470 * TARIFFA_PER_KG[zona]
 
-    resp = requests.get(INTERNATIONAL_NATIONS_URL, headers=poste_headers(), timeout=30)
+
+def calcola_prezzo_italia(peso_kg):
+    if peso_kg <= 2:   return 430
+    if peso_kg <= 5:   return 500
+    if peso_kg <= 10:  return 600
+    if peso_kg <= 20:  return 700
+    if peso_kg <= 30:  return 830
+    if peso_kg <= 50:  return 1460
+    if peso_kg <= 70:  return 1600
+    if peso_kg <= 100: return 1940
+    if peso_kg <= 200: return 3880
+    if peso_kg <= 300: return 5820
+    if peso_kg <= 400: return 7760
+    if peso_kg <= 500: return 9700
+    return 9700
+
+
+def get_poste_token():
+    now = time.time()
+    if _token_cache["access_token"] and now < _token_cache["expires_at"] - 60:
+        return _token_cache["access_token"]
+    payload = {
+        "clientId": POSTE_CLIENT_ID,
+        "secretId": POSTE_SECRET_ID,
+        "scope": SCOPE_PRODUZIONE,
+        "grantType": "client_credentials"
+    }
+    headers = {"POSTE_clientID": POSTE_CLIENT_ID, "Content-Type": "application/json"}
+    resp = requests.post(AUTH_URL, json=payload, headers=headers, timeout=10)
     resp.raise_for_status()
-    result = resp.json() or {}
-    nations = result.get("nations") or result.get("result") or result.get("return") or []
-    if not isinstance(nations, list):
-        nations = []
-    _nations_cache["at"] = now
-    _nations_cache["data"] = nations
-    return nations
+    data = resp.json()
+    _token_cache["access_token"] = data["access_token"]
+    _token_cache["expires_at"] = now + data.get("expires_in", 3599)
+    return _token_cache["access_token"]
 
 
-def get_country_info_by_iso2(iso2: str) -> Optional[Dict[str, Any]]:
-    iso2 = clean_text(iso2, max_len=2, upper=True)
-    for n in get_international_nations():
-        if clean_text(n.get("iso2"), max_len=2, upper=True) == iso2:
-            return n
-    return None
-
-
-def get_country_product_details(country_code: str, product_code: str) -> Dict[str, Any]:
-    cache_key = f"{country_code}:{product_code}"
-    if cache_key in _details_cache:
-        return _details_cache[cache_key]
-
-    payload = {"countryCode": country_code, "productCode": product_code}
-    resp = requests.post(INTERNATIONAL_NATION_DETAILS_URL, json=payload, headers=poste_headers(), timeout=30)
-    resp.raise_for_status()
-    result = resp.json() or {}
-    details = result.get("details") or result.get("return") or result
-    if not isinstance(details, dict):
-        details = {}
-    _details_cache[cache_key] = details
-    return details
-
-
-def choose_content_code(country_details: Dict[str, Any]) -> str:
-    forced = clean_text(POSTE_INTL_CONTENT_CODE, max_len=3)
-    if forced:
-        return forced
-
-    carriers = country_details.get("carriers") or {}
-    if not isinstance(carriers, dict):
-        carriers = {}
-
-    # Prefer allowed content codes
-    for _, carrier_payload in carriers.items():
-        content_list = (carrier_payload or {}).get("content") or []
-        for row in content_list:
-            allowed = str(row.get("content_allowed", "")).lower()
-            if row.get("content_allowed") in (True, 1, "1") or allowed in {"true", "yes", "y", "s"}:
-                code = clean_text(row.get("content_code"), max_len=3)
-                if code:
-                    return code
-
-    # Fallback: first content_code available
-    for _, carrier_payload in carriers.items():
-        content_list = (carrier_payload or {}).get("content") or []
-        for row in content_list:
-            code = clean_text(row.get("content_code"), max_len=3)
-            if code:
-                return code
-
-    return "999"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# PAYLOAD BUILDERS
-# ──────────────────────────────────────────────────────────────────────────────
-def build_poste_items(order: Dict[str, Any], total_weight_grams: int) -> List[Dict[str, Any]]:
-    line_items = order.get("line_items", []) or []
-    if not line_items:
-        return [
-            {
-                "itemNumber": "1",
-                "taric": clean_text(POSTE_TARIC, max_len=10),
-                "totalValue": "0",
-                "quantity": "1",
-                "totalWeight": str(total_weight_grams),
-                "originCountry": clean_text(POSTE_ORIGIN_COUNTRY, max_len=2, upper=True),
-            }
-        ]
-
-    total_qty = sum(int(li.get("quantity") or 0) for li in line_items) or 1
-    weight_per_unit = max(1, int(total_weight_grams / total_qty))
-
-    items: List[Dict[str, Any]] = []
-    idx = 1
-    for li in line_items:
-        qty = int(li.get("quantity") or 0) or 1
-        price = li.get("price") or "0"
-        try:
-            total_value = str(int(float(price) * qty))
-        except Exception:
-            total_value = "0"
-        items.append(
-            {
-                "itemNumber": str(idx),
-                "taric": clean_text(POSTE_TARIC, max_len=10),
-                "totalValue": total_value,
-                "quantity": str(qty),
-                "totalWeight": str(weight_per_unit * qty),
-                "originCountry": clean_text(POSTE_ORIGIN_COUNTRY, max_len=2, upper=True),
-            }
+def crea_spedizione_poste(ordine, paperless=False):
+    try:
+        token = get_poste_token()
+        shipping = ordine.get("shipping_address", {})
+        peso_grammi = sum(
+            item.get("grams", 500) * item.get("quantity", 1)
+            for item in ordine.get("line_items", [])
         )
-        idx += 1
-    return items
+        peso_kg = max(1, round(peso_grammi / 1000))
 
-
-def infer_receiver_type(order: Dict[str, Any], weight_kg: float) -> str:
-    return "retailDelivery"
-
-
-def build_receiver(order: Dict[str, Any], country_code: str, country_name: str, iso2: str) -> Dict[str, str]:
-    shipping = order.get("shipping_address", {}) or {}
-
-    full_name = clean_text(f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}", max_len=35)
-    company = clean_text(shipping.get("company"), max_len=35)
-    contact_name = full_name or company or "CLIENTE"
-    name_surname = company or full_name or "CLIENTE"
-
-    address1 = clean_text(shipping.get("address1"), max_len=40)
-    address2 = clean_text(shipping.get("address2"), max_len=40)
-    address = clean_text(" ".join([p for p in [address1, address2] if p]), max_len=40)
-
-    phone = digits_only(shipping.get("phone") or order.get("phone"), plus_allowed=True, max_len=15)
-    if not phone:
-        phone = digits_only(MITTENTE.get("phone"), plus_allowed=True, max_len=15)
-
-    email = clean_text(order.get("email") or MITTENTE.get("email"), max_len=50)
-
-    return {
-        "zipCode": clean_text(shipping.get("zip"), max_len=7),
-        "addressId": "",
-        "streetNumber": clean_text(shipping.get("address2"), max_len=4),
-        "city": clean_text(shipping.get("city"), max_len=30, upper=True),
-        "address": address,
-        "country": country_code,
-        "countryName": clean_text(country_name or shipping.get("country") or iso2, max_len=30),
-        "nameSurname": name_surname,
-        "contactName": contact_name,
-        "province": clean_text(shipping.get("province_code"), max_len=2, upper=True),
-        "email": email,
-        "phone": phone,
-        "cellphone": "",
-        "note1": "",
-        "note2": "",
-    }
-
-
-def validate_required_env() -> None:
-    missing = []
-    for key, value in {
-        "POSTE_CLIENT_ID": POSTE_CLIENT_ID,
-        "POSTE_SECRET_ID": POSTE_SECRET_ID,
-        "SHOPIFY_TOKEN": SHOPIFY_TOKEN,
-        "SHOPIFY_SHOP": SHOPIFY_SHOP,
-    }.items():
-        if is_blank(value):
-            missing.append(key)
-    if missing:
-        raise RuntimeError(f"Variabili mancanti: {', '.join(missing)}")
-
-
-def build_poste_payload(order: Dict[str, Any], paperless: bool = False) -> Dict[str, Any]:
-    shipping = order.get("shipping_address", {}) or {}
-    iso2 = clean_text(shipping.get("country_code") or "IT", max_len=2, upper=True)
-
-    weight_g = get_order_weight_grams(order)
-    weight_kg = round_up_kg_from_grams(weight_g)
-
-    if iso2 == "IT":
-        product_code = "APT000901"
-        country_code = "ITA1"
-        country_name = "Italia"
-    else:
-        product_code = "APT001013"
-        info = get_country_info_by_iso2(iso2)
-        if not info:
-            raise ValueError(f"Paese {iso2} non restituito da international/nations")
-        if not info.get("active"):
-            raise ValueError(f"Paese {iso2} non attivo su Poste")
-        if product_code not in (info.get("products") or []):
-            raise ValueError(f"Prodotto {product_code} non disponibile per il paese {iso2}")
-
-        country_code = clean_text(info.get("iso4") or ISO2_TO_ISO4.get(iso2, f"{iso2}1"), max_len=4, upper=True)
-        country_name = clean_text(info.get("name") or shipping.get("country") or iso2, max_len=30)
-
-    receiver = build_receiver(order, country_code, country_name, iso2)
-
-    declared = [{"weight": str(weight_g), "height": "10", "length": "30", "width": "25"}]
-
-    # Description: never empty, <= 30
-    first_title = ""
-    try:
-        first_title = clean_text(((order.get("line_items") or [{}])[0]).get("title"), max_len=60)
-    except Exception:
-        first_title = ""
-    shipment_description = clean_text(first_title or POSTE_INTL_DESCRIPTION or "Merce", max_len=30) or "Merce"
-
-    data_block: Dict[str, Any] = {
-        "declared": declared,
-        "sender": MITTENTE,
-        "receiver": receiver,
-    }
-
-    if iso2 == "IT":
-        data_block["content"] = clean_text(POSTE_INTL_DESCRIPTION, max_len=30)
-    else:
-        details = get_country_product_details(country_code, product_code)
-        content_code = choose_content_code(details)
-        log_debug("contentCode scelto:", content_code)
-
-        data_block["description"] = shipment_description
-        data_block["content"] = shipment_description  # compat
-        data_block["packagingCode"] = clean_text(POSTE_PACKAGING_CODE, max_len=2, upper=True)
-
-        items = build_poste_items(order, weight_g)
-        # Ensure NO description in items
-        for it in items:
-            it.pop("description", None)
-        data_block["items"] = items
-
-        data_block["international"] = {
-            "receiverType": infer_receiver_type(order, weight_kg),
-            "contentCode": content_code,
-        }
-
-        # Hard strip: Poste rejects services for intl unless a conform serviceMap is provided.
-        data_block.pop("services", None)
-
-    waybill: Dict[str, Any] = {
-        "clientReferenceId": str(order.get("order_number", order.get("id", "")))[:25],
-        "printFormat": "A4",
-        "product": product_code,
-        "data": data_block,
-    }
-
-    # Some validators expect it also at waybill-level for intl
-    if iso2 != "IT":
-        waybill["description"] = shipment_description
-
-    payload: Dict[str, Any] = {
-        "costCenterCode": POSTE_COST_CENTER,
-        "paperless": bool(paperless),
-        "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
-        "waybills": [waybill],
-    }
-    if POSTE_CONTRACT_CODE:
-        payload["contractCode"] = POSTE_CONTRACT_CODE
-
-    return payload
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# POSTE CALLS
-# ──────────────────────────────────────────────────────────────────────────────
-def crea_spedizione_poste(order: Dict[str, Any], paperless: bool = False) -> Optional[str]:
-    try:
-        payload = build_poste_payload(order, paperless=paperless)
-        log_debug("PAYLOAD WAYBILL:", json.dumps(payload, ensure_ascii=False))
-
-        resp = requests.post(WAYBILL_URL, json=payload, headers=poste_headers(), timeout=30)
-        resp.raise_for_status()
-        result = resp.json() or {}
-        log_debug("RISPOSTA POSTE:", result)
-
-        error_code = (result.get("result") or {}).get("errorCode")
-        if error_code not in (0, "0", None):
-            raise RuntimeError((result.get("result") or {}).get("errorDescription") or f"Errore Poste {error_code}")
-
-        waybills = result.get("waybills") or []
-        ldv = ""
-        if isinstance(waybills, list) and waybills:
-            first = waybills[0] or {}
-            ldv = first.get("code") or first.get("waybill") or first.get("barcode") or ""
-        if not ldv:
-            raise RuntimeError("LDV non restituita")
-
-        return str(ldv)
-    except Exception as exc:
-        log_debug("Errore creazione spedizione Poste:", exc)
-        return None
-
-
-def get_tracking_poste(ldv: str) -> Optional[str]:
-    try:
         payload = {
-            "arg0": {
-                "shipmentsData": [{"waybillNumber": ldv, "lastTracingState": "S"}],
-                "statusDescription": "E",
-                "customerType": "DQ",
-            }
+            "costCenterCode": POSTE_COST_CENTER,
+            "paperless": paperless,
+            "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
+            "waybills": [{
+                "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
+                "printFormat": "A4",
+                "product": "APT000901",
+                "data": {
+                    "declared": [{
+                        "weight": str(peso_kg * 1000),
+                        "height": "10", "length": "30", "width": "25"
+                    }],
+                    "content": "Merce varia",
+                    "services": {},
+                    "sender": MITTENTE,
+                    "receiver": {
+                        "zipCode": shipping.get("zip", ""),
+                        "addressId": "", "streetNumber": "",
+                        "city": shipping.get("city", "").upper(),
+                        "address": shipping.get("address1", ""),
+                        "country": "ITA1", "countryName": "Italia",
+                        "nameSurname": f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip(),
+                        "contactName": f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip(),
+                        "province": shipping.get("province_code", "")[:2].upper(),
+                        "email": ordine.get("email", ""),
+                        "phone": shipping.get("phone", ""),
+                        "cellphone": "", "note1": "", "note2": ""
+                    }
+                }
+            }]
         }
-        resp = requests.post(TRACKING_URL, json=payload, headers=poste_headers(), timeout=15)
+
+        headers = {
+            "POSTE_clientID": POSTE_CLIENT_ID,
+            "Authorization": token,
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(WAYBILL_URL, json=payload, headers=headers, timeout=15)
         resp.raise_for_status()
-        result = resp.json() or {}
-        shipment = (result.get("return") or {}).get("messages", [{}])[0]
-        events = shipment.get("tracking", []) or []
-        if events:
-            last = events[-1]
-            return str(last.get("statusDescription", "")) or None
-        return None
-    except Exception as exc:
-        log_debug("Errore tracking Poste:", exc)
+        result = resp.json()
+        print(f"RISPOSTA POSTE: {result}")
+        ldv = result.get("waybills", [{}])[0].get("code", "")
+        print(f"Spedizione creata! LDV: {ldv}")
+        return ldv
+    except Exception as e:
+        print(f"Errore creazione spedizione Poste: {e}")
         return None
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SHOPIFY
-# ──────────────────────────────────────────────────────────────────────────────
-def aggiorna_tracking_shopify(order_id: str, ldv: str) -> bool:
+def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
     try:
-        headers = {"X-Shopify-Access-Token": SHOPIFY_TOKEN, "Content-Type": "application/json"}
-
-        url_fo = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{order_id}/fulfillment_orders.json"
-        resp_fo = requests.get(url_fo, headers=headers, timeout=20)
+        headers = {
+            "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+            "Content-Type": "application/json"
+        }
+        url_fo = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillment_orders.json"
+        resp_fo = requests.get(url_fo, headers=headers, timeout=10)
         resp_fo.raise_for_status()
-        fulfillment_orders = resp_fo.json().get("fulfillment_orders", []) or []
+        fulfillment_orders = resp_fo.json().get("fulfillment_orders", [])
         if not fulfillment_orders:
             return False
-
         line_items_by_fulfillment = [
             {"fulfillment_order_id": fo["id"]}
             for fo in fulfillment_orders
@@ -524,53 +209,138 @@ def aggiorna_tracking_shopify(order_id: str, ldv: str) -> bool:
         ]
         if not line_items_by_fulfillment:
             return False
-
         url_f = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments.json"
         payload = {
             "fulfillment": {
                 "line_items_by_fulfillment_order": line_items_by_fulfillment,
-                "tracking_info": {"number": ldv, "company": "Poste Italiane", "url": ""},
-                "notify_customer": True,
+                "tracking_info": {
+                    "company": "Poste Italiane", "number": ldv,
+                    "url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}"
+                },
+                "notify_customer": True
             }
         }
-        resp = requests.post(url_f, headers=headers, json=payload, timeout=20)
+        resp = requests.post(url_f, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
+        print(f"Tracking aggiornato su Shopify per ordine #{order_number}: {ldv}")
         return True
-    except Exception as exc:
-        log_debug("Errore aggiornamento tracking Shopify:", exc)
+    except Exception as e:
+        print(f"Errore aggiornamento tracking Shopify: {e}")
         return False
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# ROUTES
-# ──────────────────────────────────────────────────────────────────────────────
-@app.route("/health", methods=["GET"])
-def health() -> Any:
-    return jsonify({"ok": True})
+# ─── ROUTE ─────────────────────────────────────────────────────────────────────
+@app.route("/")
+def home():
+    return "OK", 200
 
 
-@app.route("/shopify/webhook/fulfillment", methods=["POST"])
-def shopify_webhook_fulfillment() -> Any:
+@app.route("/shipping-rates", methods=["POST"])
+def shipping_rates():
+    data = request.get_json(silent=True) or {}
+    peso_grammi = 0
+    paese = "IT"
+    if "rate" in data:
+        rate = data["rate"]
+        paese = rate.get("destination", {}).get("country", "IT").upper()
+        for item in rate.get("items", []):
+            peso_grammi += item.get("grams", 500) * item.get("quantity", 1)
+    peso_kg = max(0.1, peso_grammi / 1000)
+
+    if paese == "IT":
+        prezzo = calcola_prezzo_italia(peso_kg)
+        nome_servizio = "Poste Italiane Express (1-2 giorni)"
+    else:
+        zona = PAESE_ZONA.get(paese)
+        if zona is None:
+            return jsonify({"rates": []}), 200
+        prezzo = calcola_prezzo_internazionale(zona, peso_kg)
+        if prezzo is None:
+            return jsonify({"rates": []}), 200
+        nome_servizio = f"Poste Italiane International Plus (Zona {zona})"
+
+    return jsonify({
+        "rates": [{
+            "service_name": nome_servizio,
+            "service_code": "poste_express",
+            "total_price": str(prezzo),
+            "currency": "EUR",
+            "min_delivery_date": None,
+            "max_delivery_date": None
+        }]
+    }), 200
+
+
+@app.route("/tracking/<ldv>", methods=["GET"])
+def tracking(ldv):
+    stato = None
     try:
-        validate_required_env()
-        order = request.get_json(force=True) or {}
+        token = get_poste_token()
+        payload = {
+            "arg0": {
+                "shipmentsData": [{"waybillNumber": ldv, "lastTracingState": "S"}],
+                "statusDescription": "E", "customerType": "DQ"
+            }
+        }
+        headers = {
+            "POSTE_clientID": POSTE_CLIENT_ID,
+            "Authorization": token,
+            "Content-Type": "application/json"
+        }
+        resp = requests.post(TRACKING_URL, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        result = resp.json()
+        shipment = result.get("return", {}).get("messages", [{}])[0]
+        tracking_events = shipment.get("tracking", [])
+        if tracking_events:
+            stato = tracking_events[-1].get("statusDescription", "")
+    except Exception as e:
+        print(f"Errore tracking: {e}")
 
-        order_id = str(order.get("id") or "")
-        if not order_id:
-            return jsonify({"ok": False, "error": "Missing order id"}), 400
+    if stato:
+        return jsonify({"ldv": ldv, "stato": stato}), 200
+    return jsonify({"error": "Tracking non disponibile"}), 404
 
-        iso2 = clean_text(((order.get("shipping_address") or {}).get("country_code")) or "IT", max_len=2, upper=True)
-        log_debug("Ordine evaso:", order.get("order_number") or order.get("name") or order.get("id"), "-", iso2)
 
-        ldv = crea_spedizione_poste(order, paperless=False)
-        if not ldv:
-            return jsonify({"ok": False, "error": "Creazione spedizione fallita"}), 500
+@app.route("/webhook/order-created", methods=["POST"])
+def order_created():
+    return jsonify({"status": "ok"}), 200
 
-        updated = aggiorna_tracking_shopify(order_id, ldv)
-        return jsonify({"ok": True, "ldv": ldv, "shopifyUpdated": updated})
-    except Exception as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 500
+
+@app.route("/webhook/order-fulfilled", methods=["POST"])
+def order_fulfilled():
+    ordine = request.get_json(silent=True)
+    if not ordine:
+        return "Bad Request", 400
+
+    ordine_id = str(ordine.get("id", ""))
+    order_number = ordine.get("order_number", "")
+
+    shipping = ordine.get("shipping_address", {}) or {}
+    paese = shipping.get("country_code", "IT").upper()
+
+    # Solo Italia gestita automaticamente
+    if paese != "IT":
+        print(f"Ordine #{order_number} estero ({paese}) - gestire manualmente")
+        return jsonify({"status": "ok", "message": "estero gestito manualmente"}), 200
+
+    ordini_processati = carica_ordini()
+    if ordine_id in ordini_processati:
+        print(f"Ordine #{order_number} gia processato, ignoro duplicato")
+        return jsonify({"status": "ok", "message": "already processed"}), 200
+
+    ordini_processati.add(ordine_id)
+    salva_ordini(ordini_processati)
+    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - Italia")
+
+    ldv = crea_spedizione_poste(ordine, paperless=False)
+
+    if ldv:
+        aggiorna_tracking_shopify(ordine_id, order_number, ldv)
+        return jsonify({"status": "ok", "ldv": ldv}), 200
+    else:
+        return jsonify({"status": "error", "message": "Errore creazione spedizione"}), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+    app.run(host="0.0.0.0", port=8080)
