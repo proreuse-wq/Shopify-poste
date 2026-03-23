@@ -406,11 +406,7 @@ def build_poste_payload(order: Dict[str, Any], paperless: bool = False) -> Dict[
     else:
         details = get_country_product_details(country_code, product_code)
         content_code = choose_content_code(details)
-        if content_code == "999":
-            log_debug("INTL nation/details carriers:", json.dumps(details.get("carriers", {}), ensure_ascii=False))
-            raise ValueError(
-                "contentCode non determinato (999). Imposta POSTE_INTL_CONTENT_CODE o verifica international/nation/details."
-            )
+        log_debug("contentCode scelto:", content_code)
 
         data_block["description"] = shipment_description
         data_block["content"] = shipment_description  # compat
