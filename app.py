@@ -332,8 +332,6 @@ def get_poste_token() -> str:
     if _token_cache["access_token"] and now < _token_cache["expires_at"] - 60:
         return _token_cache["access_token"]
 
-    log_debug("DEBUG COUNTRY:", shipping.get("country"), paese)
-    log_debug("DEBUG MITTENTE PHONE:", MITTENTE.get("phone"))
     payload = {
         "clientId": POSTE_CLIENT_ID,
         "secretId": POSTE_SECRET_ID,
@@ -488,6 +486,8 @@ def validate_required_env() -> None:
 def build_poste_payload(ordine: Dict[str, Any], paperless: bool = False) -> Dict[str, Any]:
     shipping = ordine.get("shipping_address", {}) or {}
     paese = clean_text(shipping.get("country_code") or "IT", max_len=2, upper=True)
+    log_debug("DEBUG COUNTRY:", shipping.get("country"), paese)
+    log_debug("DEBUG MITTENTE PHONE:", MITTENTE.get("phone"))
     peso_grammi = get_order_weight_grams(ordine)
     peso_kg = round_up_kg_from_grams(peso_grammi)
 
