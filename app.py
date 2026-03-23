@@ -517,12 +517,12 @@ def build_poste_payload(ordine: Dict[str, Any], paperless: bool = False) -> Dict
     if paese == "IT":
         data_block["content"] = clean_text(DEFAULT_INTL_CONTENT_DESCRIPTION, max_len=30)
     else:
-        declared[0]["packagingCode"] = DEFAULT_PACKAGING_CODE
         country_details = get_country_product_details(country_code, product_code)
         content_code = choose_content_code(country_details)
         receiver_type = infer_receiver_type(ordine, peso_kg)
 
         data_block["description"] = clean_text(DEFAULT_INTL_CONTENT_DESCRIPTION, max_len=30)
+        data_block["packagingCode"] = DEFAULT_PACKAGING_CODE
         data_block["items"] = build_poste_items(ordine, peso_grammi)
         data_block["international"] = {
             "receiverType": receiver_type,
