@@ -224,6 +224,7 @@ def crea_spedizione_poste(ordine, paperless=False):
                         "height": "10", "length": "30", "width": "25"
                     }],
                     "content": "Merce varia",
+                    "contentCode": "999" if paese != "IT" else "",
                     "services": {},
                     "sender": MITTENTE,
                     "receiver": {
@@ -412,10 +413,10 @@ def order_fulfilled():
     shipping = ordine.get("shipping_address", {})
     paese = shipping.get("country_code", "IT").upper()
 
-    # Solo Italia viene gestita automaticamente
-    if paese != "IT":
-        print(f"Ordine #{order_number} estero ({paese}) - gestire manualmente su MyPosteDeliveryBusiness")
-        return jsonify({"status": "ok", "message": "estero gestito manualmente"}), 200
+    # Italia e UE gestiti automaticamente
+    if paese != "IT" and paese not in PAESE_ZONA:
+        print(f"Ordine #{order_number} - paese {paese} non gestito, manuale")
+        return jsonify({"status": "ok", "message": "paese non gestito"}), 200
 
     print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - Italia")
 
