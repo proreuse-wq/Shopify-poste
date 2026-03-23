@@ -224,8 +224,8 @@ def crea_spedizione_poste(ordine, paperless=False):
                         "height": "10", "length": "30", "width": "25"
                     }],
                     "content": "Merce varia",
-                    "contentCode": "999" if paese != "IT" else "",
                     "services": {},
+                    "international": {"receiverType": "retailDelivery"} if paese != "IT" else {},
                     "sender": MITTENTE,
                     "receiver": {
                         "zipCode": shipping.get("zip", ""),
