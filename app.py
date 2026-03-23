@@ -241,22 +241,15 @@ def allocate_item_weight(total_weight: int, item: Dict[str, Any], order_line_ite
 
 
 def build_poste_items(ordine: Dict[str, Any], total_weight_grams: int) -> List[Dict[str, str]]:
-    """
-    Build `items[]` for international shipments.
-
-    Nota: lo schema PDB per APT000904 / APT001013 NON prevede `description` dentro each item.
-    In caso di campo extra, l'API può rispondere con errori fuorvianti (es. "description mancante").
-    """
     line_items = ordine.get("line_items", []) or []
     order_total_cents = get_order_total_cents(ordine)
-
     raw_items: List[Dict[str, str]] = []
     computed_total = 0
 
     for idx, item in enumerate(line_items, start=1):
         quantity = max(1, int(item.get("quantity", 1) or 1))
-
         unit_price = item.get("price") or item.get("price_set", {}).get("shop_money", {}).get("amount")
+        total_value = None
         try:
             total_value = int(round(float(str(unit_price).replace(",", ".")) * 100)) * quantity
         except Exception:
@@ -270,6 +263,7 @@ def build_poste_items(ordine: Dict[str, Any], total_weight_grams: int) -> List[D
 
         raw_items.append({
             "itemNumber": str(idx),
+            "description": clean_text(item.get("title") or item.get("name") or DEFAULT_INTL_CONTENT_DESCRIPTION, max_len=30),
             "taric": get_item_taric(item),
             "totalValue": str(max(1, total_value)),
             "quantity": str(quantity),
@@ -420,22 +414,34 @@ def get_country_info_by_iso2(iso2: str) -> Optional[Dict[str, Any]]:
 
 
 def choose_content_code(country_details: Dict[str, Any]) -> str:
+    """Return a valid international contentCode for APT001013.
+
+    Poste returns the list of allowed contents under carriers.<CARRIER>.content in
+    international/nation/details. Falling back to "999" is almost always rejected by
+    the API, so the caller should fail fast if "999" is returned.
+    """
     forced = clean_text(os.environ.get("POSTE_INTL_CONTENT_CODE"), max_len=3)
     if forced:
         return forced
-    content_list = country_details.get("content", []) or []
-    for row in content_list:
-        allowed = str(row.get("content_allowed", "")).lower()
-        if row.get("content_allowed") in (True, 1, "1") or allowed in {"true", "yes", "y", "s"}:
+
+    carriers = country_details.get("carriers") or {}
+    for _, carrier_payload in carriers.items():
+        content_list = carrier_payload.get("content") or []
+        for row in content_list:
+            allowed = str(row.get("content_allowed", "")).lower()
+            if row.get("content_allowed") in (True, 1, "1") or allowed in {"true", "yes", "y", "s"}:
+                code = clean_text(row.get("content_code"), max_len=3)
+                if code:
+                    return code
+
+    for _, carrier_payload in carriers.items():
+        content_list = carrier_payload.get("content") or []
+        for row in content_list:
             code = clean_text(row.get("content_code"), max_len=3)
             if code:
                 return code
-    for row in content_list:
-        code = clean_text(row.get("content_code"), max_len=3)
-        if code:
-            return code
-    return "999"
 
+    return "999"
 
 def build_receiver(ordine: Dict[str, Any], country_code: str, country_name: str, paese: str) -> Dict[str, str]:
     shipping = ordine.get("shipping_address", {}) or {}
@@ -510,7 +516,11 @@ def build_poste_payload(ordine: Dict[str, Any], paperless: bool = False) -> Dict
             raise ValueError(f"Paese {paese} non attivo su Poste")
         if product_code not in (country_info.get("products") or []):
             raise ValueError(f"Prodotto {product_code} non disponibile per il paese {paese}")
-        country_code = clean_text(country_info.get("iso4") or ISO2_TO_ISO4.get(paese, f"{paese}1"), max_len=4, upper=True)
+        country_code = clean_text(
+            country_info.get("iso4") or ISO2_TO_ISO4.get(paese, f"{paese}1"),
+            max_len=4,
+            upper=True,
+        )
         country_name = clean_text(country_info.get("name") or shipping.get("country") or paese, max_len=30)
 
     receiver = build_receiver(ordine, country_code, country_name, paese)
@@ -522,11 +532,24 @@ def build_poste_payload(ordine: Dict[str, Any], paperless: bool = False) -> Dict
         "width": "25",
     }]
 
+    first_title = ""
+    try:
+        first_title = clean_text(((ordine.get("line_items") or [{}])[0]).get("title"), max_len=60)
+    except Exception:
+        first_title = ""
+    shipment_description = clean_text(first_title or DEFAULT_INTL_CONTENT_DESCRIPTION or "Merce", max_len=30) or "Merce"
+
     data_block: Dict[str, Any] = {
         "declared": declared,
-        "services": {},
         "sender": MITTENTE,
         "receiver": receiver,
+    }
+
+    waybill: Dict[str, Any] = {
+        "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
+        "printFormat": "A4",
+        "product": product_code,
+        "data": data_block,
     }
 
     if paese == "IT":
@@ -536,18 +559,28 @@ def build_poste_payload(ordine: Dict[str, Any], paperless: bool = False) -> Dict
         content_code = choose_content_code(country_details)
         receiver_type = infer_receiver_type(ordine, peso_kg)
 
-        first_title = ""
-        try:
-            first_title = clean_text(((ordine.get("line_items") or [{}])[0]).get("title"), max_len=30)
-        except Exception:
-            first_title = ""
-        data_block["description"] = first_title or clean_text(DEFAULT_INTL_CONTENT_DESCRIPTION, max_len=30) or "Merce"
+        if content_code == "999":
+            log_debug("INTL nation/details carriers:", json.dumps(country_details.get("carriers", {}), ensure_ascii=False))
+            raise ValueError(
+                "contentCode non determinato (999). Imposta POSTE_INTL_CONTENT_CODE oppure correggi parsing carriers.*.content"
+            )
+
+        data_block["description"] = shipment_description
+        data_block["content"] = shipment_description
         data_block["packagingCode"] = DEFAULT_PACKAGING_CODE
-        data_block["items"] = build_poste_items(ordine, peso_grammi)
+
+        items = build_poste_items(ordine, peso_grammi)
+        for it in items:
+            it.pop("description", None)
+        data_block["items"] = items
+
         data_block["international"] = {
             "receiverType": receiver_type,
             "contentCode": content_code,
         }
+
+        waybill["description"] = shipment_description
+
         if POSTE_CONTRACT_CODE:
             try:
                 service_info = get_waybill_services(
@@ -564,21 +597,15 @@ def build_poste_payload(ordine: Dict[str, Any], paperless: bool = False) -> Dict
         else:
             log_debug("WAYBILL SERVICES skipped: POSTE_CONTRACT_CODE not set")
 
-    payload = {
+    payload: Dict[str, Any] = {
         "costCenterCode": POSTE_COST_CENTER,
         "paperless": bool(paperless),
         "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
-        "waybills": [{
-            "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
-            "printFormat": "A4",
-            "product": product_code,
-            "data": data_block,
-        }],
+        "waybills": [waybill],
     }
     if POSTE_CONTRACT_CODE:
         payload["contractCode"] = POSTE_CONTRACT_CODE
     return payload
-
 
 def crea_spedizione_poste(ordine: Dict[str, Any], paperless: bool = False) -> Optional[str]:
     try:
