@@ -262,6 +262,7 @@ def build_poste_items(ordine: Dict[str, Any], total_weight_grams: int) -> List[D
 
         raw_items.append({
             "itemNumber": str(idx),
+            "description": clean_text(item.get("title") or item.get("name") or DEFAULT_INTL_CONTENT_DESCRIPTION, max_len=30),
             "taric": get_item_taric(item),
             "totalValue": str(max(1, total_value)),
             "quantity": str(quantity),
