@@ -241,15 +241,22 @@ def allocate_item_weight(total_weight: int, item: Dict[str, Any], order_line_ite
 
 
 def build_poste_items(ordine: Dict[str, Any], total_weight_grams: int) -> List[Dict[str, str]]:
+    """
+    Build `items[]` for international shipments.
+
+    Nota: lo schema PDB per APT000904 / APT001013 NON prevede `description` dentro each item.
+    In caso di campo extra, l'API può rispondere con errori fuorvianti (es. "description mancante").
+    """
     line_items = ordine.get("line_items", []) or []
     order_total_cents = get_order_total_cents(ordine)
+
     raw_items: List[Dict[str, str]] = []
     computed_total = 0
 
     for idx, item in enumerate(line_items, start=1):
         quantity = max(1, int(item.get("quantity", 1) or 1))
+
         unit_price = item.get("price") or item.get("price_set", {}).get("shop_money", {}).get("amount")
-        total_value = None
         try:
             total_value = int(round(float(str(unit_price).replace(",", ".")) * 100)) * quantity
         except Exception:
@@ -263,7 +270,6 @@ def build_poste_items(ordine: Dict[str, Any], total_weight_grams: int) -> List[D
 
         raw_items.append({
             "itemNumber": str(idx),
-            "description": clean_text(item.get("title") or item.get("name") or DEFAULT_INTL_CONTENT_DESCRIPTION, max_len=30),
             "taric": get_item_taric(item),
             "totalValue": str(max(1, total_value)),
             "quantity": str(quantity),
@@ -542,19 +548,21 @@ def build_poste_payload(ordine: Dict[str, Any], paperless: bool = False) -> Dict
             "receiverType": receiver_type,
             "contentCode": content_code,
         }
-
-        try:
-            service_info = get_waybill_services(
-                product_code=product_code,
-                sender=MITTENTE,
-                receiver=receiver,
-                declared=declared,
-                receiver_type=receiver_type,
-                content_code=content_code,
-            )
-            log_debug("WAYBILL SERVICES:", json.dumps(service_info, ensure_ascii=False))
-        except Exception as exc:
-            log_debug(f"waybill/services non disponibile: {exc}")
+        if POSTE_CONTRACT_CODE:
+            try:
+                service_info = get_waybill_services(
+                    product_code=product_code,
+                    sender=MITTENTE,
+                    receiver=receiver,
+                    declared=declared,
+                    receiver_type=receiver_type,
+                    content_code=content_code,
+                )
+                log_debug("WAYBILL SERVICES:", json.dumps(service_info, ensure_ascii=False))
+            except Exception as exc:
+                log_debug(f"waybill/services non disponibile: {exc}")
+        else:
+            log_debug("WAYBILL SERVICES skipped: POSTE_CONTRACT_CODE not set")
 
     payload = {
         "costCenterCode": POSTE_COST_CENTER,
