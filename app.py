@@ -3,6 +3,7 @@ import requests
 import time
 import os
 import json
+import math
 
 app = Flask(__name__)
 
@@ -56,6 +57,18 @@ PAESE_ZONA = {
     "BG": 3, "HR": 3, "GR": 3, "MT": 3, "NO": 3, "CH": 3,
     "CY": 4, "IE": 4,
     "GB": 10,
+}
+
+# ─── MAPPA ISO2 → ISO4 ─────────────────────────────────────────────────────────
+ISO2_TO_ISO4 = {
+    "AT": "AUT1", "BE": "BEL1", "BG": "BGR1", "HR": "HRV1",
+    "CY": "CYP1", "CZ": "CZE1", "DK": "DNK1", "EE": "EST1",
+    "FI": "FIN1", "FR": "FRA1", "DE": "DEU1", "GR": "GRC1",
+    "HU": "HUN1", "IE": "IRL1", "LV": "LVA1", "LT": "LTU1",
+    "LU": "LUX1", "MT": "MLT1", "NL": "NLD1", "PL": "POL1",
+    "PT": "PRT1", "RO": "ROU1", "SK": "SVK1", "SI": "SVN1",
+    "ES": "ESP1", "SE": "SWE1", "GB": "GBR1", "NO": "NOR1",
+    "CH": "CHE1", "LI": "LIE1", "MC": "MCO1",
 }
 
 # ─── TARIFFE INTERNAZIONALI (centesimi) ────────────────────────────────────────
@@ -130,60 +143,196 @@ def get_poste_token():
     return _token_cache["access_token"]
 
 
+def crea_spedizione_italia(ordine, token, paperless=False):
+    shipping = ordine.get("shipping_address", {})
+    peso_grammi = sum(
+        item.get("grams", 500) * item.get("quantity", 1)
+        for item in ordine.get("line_items", [])
+    )
+    peso_kg = max(1, round(peso_grammi / 1000))
+
+    payload = {
+        "costCenterCode": POSTE_COST_CENTER,
+        "paperless": paperless,
+        "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
+        "waybills": [{
+            "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
+            "printFormat": "A4",
+            "product": "APT000901",
+            "data": {
+                "declared": [{
+                    "weight": str(peso_kg * 1000),
+                    "height": "10", "length": "30", "width": "25"
+                }],
+                "content": "Merce varia",
+                "services": {},
+                "sender": MITTENTE,
+                "receiver": {
+                    "zipCode": shipping.get("zip", ""),
+                    "addressId": "", "streetNumber": "",
+                    "city": shipping.get("city", "").upper(),
+                    "address": shipping.get("address1", ""),
+                    "country": "ITA1", "countryName": "Italia",
+                    "nameSurname": f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip(),
+                    "contactName": f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip(),
+                    "province": shipping.get("province_code", "")[:2].upper(),
+                    "email": ordine.get("email", ""),
+                    "phone": shipping.get("phone", ""),
+                    "cellphone": "", "note1": "", "note2": ""
+                }
+            }
+        }]
+    }
+
+    headers = {
+        "POSTE_clientID": POSTE_CLIENT_ID,
+        "Authorization": token,
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(WAYBILL_URL, json=payload, headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def crea_spedizione_internazionale(ordine, token, paperless=False):
+    shipping = ordine.get("shipping_address", {})
+    paese = shipping.get("country_code", "").upper()
+    country_code = ISO2_TO_ISO4.get(paese, paese + "1")
+    country_name = shipping.get("country", paese)
+
+    peso_grammi = sum(
+        item.get("grams", 500) * item.get("quantity", 1)
+        for item in ordine.get("line_items", [])
+    )
+    peso_grammi = max(1, peso_grammi)
+    peso_kg = max(1, math.ceil(peso_grammi / 1000))
+
+    # Valore totale ordine in centesimi
+    try:
+        total_cents = int(round(float(str(ordine.get("total_price", "10")).replace(",", ".")) * 100))
+    except:
+        total_cents = 1000
+
+    # Nome prodotto per description
+    try:
+        description = str(ordine.get("line_items", [{}])[0].get("title", "Merce varia"))[:30]
+    except:
+        description = "Merce varia"
+
+    # Costruisci items
+    line_items = ordine.get("line_items", [])
+    items = []
+    for idx, item in enumerate(line_items, start=1):
+        qty = max(1, int(item.get("quantity", 1) or 1))
+        try:
+            unit_price = float(str(item.get("price", "0")).replace(",", "."))
+            item_total = int(round(unit_price * 100)) * qty
+        except:
+            item_total = max(1, total_cents // max(1, len(line_items)))
+
+        item_grams = max(1, int(item.get("grams", 500) or 500) * qty)
+        item_title = str(item.get("title", "Merce varia"))[:30]
+
+        items.append({
+            "itemNumber": str(idx),
+            "description": item_title,
+            "quantity": str(qty),
+            "totalValue": str(max(1, item_total)),
+            "totalWeight": str(item_grams),
+            "originCountry": "IT",
+            "taric": "0000000000",
+        })
+
+    receiver_type = "retailDelivery"
+    if shipping.get("company"):
+        receiver_type = "businessDelivery"
+
+    full_name = f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip() or "CLIENTE"
+    company = shipping.get("company", "")
+    name_surname = company or full_name
+    address = shipping.get("address1", "")
+    if shipping.get("address2"):
+        address = f"{address} {shipping.get('address2')}".strip()
+
+    phone = shipping.get("phone", "") or ordine.get("phone", "")
+
+    payload = {
+        "costCenterCode": POSTE_COST_CENTER,
+        "paperless": paperless,
+        "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
+        "waybills": [{
+            "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
+            "printFormat": "A4",
+            "product": "APT001013",
+            "data": {
+                "declared": [{
+                    "weight": str(peso_grammi),
+                    "height": "10",
+                    "length": "30",
+                    "width": "25",
+                    "packagingCode": "C",
+                }],
+                "description": description,
+                "items": items,
+                "international": {
+                    "receiverType": receiver_type,
+                    "contentCode": "999",
+                },
+                "sender": MITTENTE,
+                "receiver": {
+                    "zipCode": shipping.get("zip", "")[:7],
+                    "addressId": "",
+                    "streetNumber": "",
+                    "city": shipping.get("city", "").upper()[:30],
+                    "address": address[:40],
+                    "country": country_code,
+                    "countryName": country_name[:30],
+                    "nameSurname": name_surname[:35],
+                    "contactName": full_name[:35],
+                    "province": "",
+                    "email": ordine.get("email", "")[:50],
+                    "phone": phone[:15],
+                    "cellphone": "",
+                    "note1": "",
+                    "note2": "",
+                }
+            }
+        }]
+    }
+
+    headers = {
+        "POSTE_clientID": POSTE_CLIENT_ID,
+        "Authorization": token,
+        "Content-Type": "application/json"
+    }
+    print(f"PAYLOAD INTERNAZIONALE: {json.dumps(payload)}")
+    resp = requests.post(WAYBILL_URL, json=payload, headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def crea_spedizione_poste(ordine, paperless=False):
     try:
         token = get_poste_token()
-        shipping = ordine.get("shipping_address", {})
-        peso_grammi = sum(
-            item.get("grams", 500) * item.get("quantity", 1)
-            for item in ordine.get("line_items", [])
-        )
-        peso_kg = max(1, round(peso_grammi / 1000))
+        shipping = ordine.get("shipping_address", {}) or {}
+        paese = shipping.get("country_code", "IT").upper()
 
-        payload = {
-            "costCenterCode": POSTE_COST_CENTER,
-            "paperless": paperless,
-            "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
-            "waybills": [{
-                "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
-                "printFormat": "A4",
-                "product": "APT000901",
-                "data": {
-                    "declared": [{
-                        "weight": str(peso_kg * 1000),
-                        "height": "10", "length": "30", "width": "25"
-                    }],
-                    "content": "Merce varia",
-                    "services": {},
-                    "sender": MITTENTE,
-                    "receiver": {
-                        "zipCode": shipping.get("zip", ""),
-                        "addressId": "", "streetNumber": "",
-                        "city": shipping.get("city", "").upper(),
-                        "address": shipping.get("address1", ""),
-                        "country": "ITA1", "countryName": "Italia",
-                        "nameSurname": f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip(),
-                        "contactName": f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip(),
-                        "province": shipping.get("province_code", "")[:2].upper(),
-                        "email": ordine.get("email", ""),
-                        "phone": shipping.get("phone", ""),
-                        "cellphone": "", "note1": "", "note2": ""
-                    }
-                }
-            }]
-        }
+        if paese == "IT":
+            result = crea_spedizione_italia(ordine, token, paperless)
+        else:
+            result = crea_spedizione_internazionale(ordine, token, paperless)
 
-        headers = {
-            "POSTE_clientID": POSTE_CLIENT_ID,
-            "Authorization": token,
-            "Content-Type": "application/json"
-        }
-        resp = requests.post(WAYBILL_URL, json=payload, headers=headers, timeout=15)
-        resp.raise_for_status()
-        result = resp.json()
         print(f"RISPOSTA POSTE: {result}")
+
+        error_code = result.get("result", {}).get("errorCode")
+        if error_code not in (0, "0", None):
+            raise RuntimeError(result.get("result", {}).get("errorDescription", f"Errore {error_code}"))
+
         ldv = result.get("waybills", [{}])[0].get("code", "")
-        print(f"Spedizione creata! LDV: {ldv}")
+        if not ldv:
+            raise RuntimeError("LDV non restituita")
+
+        print(f"Spedizione creata! LDV: {ldv} - Paese: {paese}")
         return ldv
     except Exception as e:
         print(f"Errore creazione spedizione Poste: {e}")
@@ -319,10 +468,10 @@ def order_fulfilled():
     shipping = ordine.get("shipping_address", {}) or {}
     paese = shipping.get("country_code", "IT").upper()
 
-    # Solo Italia gestita automaticamente
-    if paese != "IT":
-        print(f"Ordine #{order_number} estero ({paese}) - gestire manualmente")
-        return jsonify({"status": "ok", "message": "estero gestito manualmente"}), 200
+    # Gestisce solo Italia e paesi nella lista Poste
+    if paese != "IT" and paese not in PAESE_ZONA:
+        print(f"Ordine #{order_number} - paese {paese} non gestito, manuale")
+        return jsonify({"status": "ok", "message": "paese non gestito"}), 200
 
     ordini_processati = carica_ordini()
     if ordine_id in ordini_processati:
@@ -331,7 +480,7 @@ def order_fulfilled():
 
     ordini_processati.add(ordine_id)
     salva_ordini(ordini_processati)
-    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - Italia")
+    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - {paese}")
 
     ldv = crea_spedizione_poste(ordine, paperless=False)
 
