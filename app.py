@@ -197,8 +197,8 @@ def crea_spedizione_italia(ordine, token, paperless=False):
 
 def crea_spedizione_internazionale(ordine, token, paperless=False):
     shipping = ordine.get("shipping_address", {})
-    paese = shipping.get("country_code", "").upper()
-    country_code = ISO2_TO_ISO4.get(paese, paese + "1")
+    paese = (shipping.get("country_code", "") or "").upper()
+    country_code = paese  # Poste lato receiver internazionale sembra accettare ISO2 (DE, FR, ...)
     country_name = shipping.get("country", paese)
 
     peso_grammi = sum(
@@ -246,9 +246,13 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
             item_payload["taric"] = "0000000000"
         items.append(item_payload)
 
-    receiver_type = "retailDelivery"
-    if shipping.get("company"):
+    force_receiver_type = (os.environ.get("POSTE_INTL_RECEIVER_TYPE", "") or "").strip().lower()
+    if force_receiver_type in {"business", "businessdelivery"}:
         receiver_type = "businessDelivery"
+    elif force_receiver_type in {"retail", "retaildelivery"}:
+        receiver_type = "retailDelivery"
+    else:
+        receiver_type = "businessDelivery" if shipping.get("company") else "retailDelivery"
 
     full_name = f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip() or "CLIENTE"
     company = shipping.get("company", "")
@@ -321,10 +325,31 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
         "Authorization": token,
         "Content-Type": "application/json"
     }
-    print(f"PAYLOAD INTERNAZIONALE: {json.dumps(payload)}")
-    resp = requests.post(WAYBILL_URL, json=payload, headers=headers, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+
+    def _post_payload(current_payload):
+        print(f"PAYLOAD INTERNAZIONALE: {json.dumps(current_payload, ensure_ascii=False)}")
+        resp = requests.post(WAYBILL_URL, json=current_payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    result = _post_payload(payload)
+    error_desc = str(result.get("result", {}).get("errorDescription", "") or "")
+
+    # Fallback pragmatico: se Poste rifiuta per incompatibilità carrier,
+    # ritenta con il tipo opposto (Retail <-> Business).
+    if "carriers non compatibili" in error_desc.lower():
+        current_type = payload["waybills"][0]["data"]["international"].get("receiverType", "retailDelivery")
+        alternate_type = "businessDelivery" if current_type == "retailDelivery" else "retailDelivery"
+        payload_retry = json.loads(json.dumps(payload))
+        payload_retry["waybills"][0]["data"]["international"]["receiverType"] = alternate_type
+        print(f"Retry internazionale con receiverType={alternate_type}")
+        retry_result = _post_payload(payload_retry)
+        retry_error = retry_result.get("result", {}).get("errorCode")
+        if retry_error in (0, "0", None):
+            return retry_result
+        return retry_result
+
+    return result
 
 
 def crea_spedizione_poste(ordine, paperless=False):
