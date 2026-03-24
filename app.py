@@ -12,12 +12,14 @@ POSTE_CLIENT_ID = os.environ.get("POSTE_CLIENT_ID", "")
 POSTE_SECRET_ID = os.environ.get("POSTE_SECRET_ID", "")
 POSTE_COST_CENTER = "CDC-00080197"
 
+MITTENTE_PHONE = os.environ.get("MITTENTE_PHONE", "+393775435992")
+
 MITTENTE = {
     "zipCode": "10070", "streetNumber": "30", "city": "VALLO TORINESE",
     "address": "Via Torino", "country": "ITA1", "countryName": "Italia",
     "nameSurname": "PROREUSE SRLS", "contactName": "PROREUSE SRLS",
     "province": "TO", "email": "proreuse1622@gmail.com",
-    "phone": "", "cellphone": "", "note1": "", "note2": ""
+    "phone": MITTENTE_PHONE, "cellphone": MITTENTE_PHONE, "note1": "", "note2": ""
 }
 
 AUTH_URL = "https://apiw.gp.posteitaliane.it/gp/internet/user/sessions"
@@ -232,15 +234,17 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
         item_grams = max(1, int(item.get("grams", 500) or 500) * qty)
         item_title = str(item.get("title", "Merce varia"))[:30]
 
-        items.append({
+        item_payload = {
             "itemNumber": str(idx),
             "description": item_title,
             "quantity": str(qty),
             "totalValue": str(max(1, item_total)),
             "totalWeight": str(item_grams),
             "originCountry": "IT",
-            "taric": "0000000000",
-        })
+        }
+        if paese in {"GB", "CH", "NO"}:
+            item_payload["taric"] = "0000000000"
+        items.append(item_payload)
 
     receiver_type = "retailDelivery"
     if shipping.get("company"):
@@ -279,9 +283,11 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                     "height": "10",
                     "length": "30",
                     "width": "25",
-                    "packagingCode": "C",
+                    "packagingCode": "box",
                     "description": description,
                 }],
+                "content": description,
+                "description": description,
                 "items": items,
                 "services": {},
                 "international": {
@@ -302,7 +308,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                     "province": "",
                     "email": ordine.get("email", "")[:50],
                     "phone": phone[:15],
-                    "cellphone": "",
+                    "cellphone": phone[:15],
                     "note1": "",
                     "note2": "",
                 }
@@ -488,13 +494,13 @@ def order_fulfilled():
         print(f"Ordine #{order_number} gia processato, ignoro duplicato")
         return jsonify({"status": "ok", "message": "already processed"}), 200
 
-    ordini_processati.add(ordine_id)
-    salva_ordini(ordini_processati)
     print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - {paese}")
 
     ldv = crea_spedizione_poste(ordine, paperless=False)
 
     if ldv:
+        ordini_processati.add(ordine_id)
+        salva_ordini(ordini_processati)
         aggiorna_tracking_shopify(ordine_id, order_number, ldv)
         return jsonify({"status": "ok", "ldv": ldv}), 200
     else:
