@@ -253,7 +253,17 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
     if shipping.get("address2"):
         address = f"{address} {shipping.get('address2')}".strip()
 
-    phone = shipping.get("phone", "") or ordine.get("phone", "")
+    phone_raw = shipping.get("phone", "") or ordine.get("phone", "") or ""
+    # Pulizia telefono: solo cifre e + iniziale, max 15 caratteri
+    phone_clean = phone_raw.strip()
+    if phone_clean.startswith("+"):
+        phone = "+" + "".join(c for c in phone_clean[1:] if c.isdigit())
+    else:
+        phone = "".join(c for c in phone_clean if c.isdigit())
+    phone = phone[:15]
+    # Se vuoto usa fallback
+    if not phone:
+        phone = "+390000000000"
 
     payload = {
         "costCenterCode": POSTE_COST_CENTER,
