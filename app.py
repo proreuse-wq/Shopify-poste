@@ -274,6 +274,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                 }],
                 "description": description,
                 "items": items,
+                "services": {},
                 "international": {
                     "receiverType": receiver_type,
                     "contentCode": "999",
