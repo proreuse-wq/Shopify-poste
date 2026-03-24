@@ -263,6 +263,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
             "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
             "printFormat": "A4",
             "product": "APT001013",
+            "description": description,
             "data": {
                 "declared": [{
                     "weight": str(peso_grammi),
