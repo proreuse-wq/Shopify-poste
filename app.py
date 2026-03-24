@@ -4,6 +4,8 @@ import time
 import os
 import json
 import math
+import re
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -50,6 +52,40 @@ def salva_ordini(ordini):
             json.dump(list(ordini), f)
     except:
         pass
+
+def clean_phone(value):
+    v = (value or "").strip()
+    out = []
+    for i, ch in enumerate(v):
+        if ch.isdigit():
+            out.append(ch)
+        elif ch == "+" and i == 0:
+            out.append(ch)
+    result = "".join(out)[:15]
+    return result or MITTENTE_PHONE
+
+
+def trunc(value, n):
+    return (value or "")[:n]
+
+
+def split_address(address1, address2=""):
+    raw = f"{address1 or ''} {address2 or ''}".strip()
+    raw = re.sub(r"\s+", " ", raw)
+    m = re.search(r"\b(\d+[A-Za-z]?)\b", raw)
+    street_number = m.group(1)[:4] if m else ""
+    street = raw.replace(m.group(0), "", 1).strip(" ,") if m else raw
+    return trunc(street, 40), trunc(street_number, 4)
+
+
+def iso4_from_iso2(country_code):
+    cc = (country_code or "").upper().strip()
+    return ISO2_TO_ISO4.get(cc, "")
+
+
+def log_poste_response(prefix, response_json):
+    print(f"{prefix}: {json.dumps(response_json, ensure_ascii=False)}")
+
 
 # ─── MAPPA PAESI → ZONA ────────────────────────────────────────────────────────
 PAESE_ZONA = {
@@ -196,129 +232,106 @@ def crea_spedizione_italia(ordine, token, paperless=False):
 
 
 def crea_spedizione_internazionale(ordine, token, paperless=False):
-    shipping = ordine.get("shipping_address", {})
-    paese = (shipping.get("country_code", "") or "").upper()
-    country_code = paese  # Poste lato receiver internazionale sembra accettare ISO2 (DE, FR, ...)
-    country_name = shipping.get("country", paese)
+    shipping = ordine.get("shipping_address", {}) or {}
+    billing = ordine.get("billing_address", {}) or {}
 
-    peso_grammi = sum(
-        item.get("grams", 500) * item.get("quantity", 1)
-        for item in ordine.get("line_items", [])
-    )
-    peso_grammi = max(1, peso_grammi)
-    peso_kg = max(1, math.ceil(peso_grammi / 1000))
+    paese_iso2 = (shipping.get("country_code") or billing.get("country_code") or "").upper()
+    country_code = iso4_from_iso2(paese_iso2)
+    if not country_code:
+        raise RuntimeError(f"Paese non supportato da mappa ISO4: {paese_iso2}")
 
-    # Valore totale ordine in centesimi
-    try:
-        total_cents = int(round(float(str(ordine.get("total_price", "10")).replace(",", ".")) * 100))
-    except:
-        total_cents = 1000
+    country_name = shipping.get("country") or billing.get("country") or paese_iso2
+    city = trunc((shipping.get("city") or billing.get("city") or "").upper(), 30)
+    province = trunc((shipping.get("province_code") or billing.get("province_code") or "").upper(), 2)
+    zip_code = trunc(shipping.get("zip") or billing.get("zip") or "", 10)
 
-    # Nome prodotto per description
-    try:
-        description = str(ordine.get("line_items", [{}])[0].get("title", "Merce varia"))[:30]
-    except:
-        description = "Merce varia"
+    street, street_number = split_address(shipping.get("address1") or billing.get("address1") or "",
+                                          shipping.get("address2") or billing.get("address2") or "")
 
-    # Costruisci items
-    line_items = ordine.get("line_items", [])
+    first_name = shipping.get("first_name") or billing.get("first_name") or ""
+    last_name = shipping.get("last_name") or billing.get("last_name") or ""
+    company = shipping.get("company") or billing.get("company") or ""
+    full_name = (f"{first_name} {last_name}").strip() or company or "CLIENTE"
+    name_surname = trunc(company or full_name, 35)
+    contact_name = trunc(full_name, 35)
+
+    phone = clean_phone(shipping.get("phone") or billing.get("phone") or ordine.get("phone") or "")
+    email = trunc(ordine.get("email") or "cliente@example.com", 50)
+
+    line_items = ordine.get("line_items", []) or []
+    description = trunc(str((line_items[0] if line_items else {}).get("title", "Merce varia")), 30)
+
+    total_weight = 0
     items = []
     for idx, item in enumerate(line_items, start=1):
         qty = max(1, int(item.get("quantity", 1) or 1))
+        grams_each = max(1, int(item.get("grams", 500) or 500))
+        total_item_weight = grams_each * qty
+        total_weight += total_item_weight
         try:
             unit_price = float(str(item.get("price", "0")).replace(",", "."))
-            item_total = int(round(unit_price * 100)) * qty
-        except:
-            item_total = max(1, total_cents // max(1, len(line_items)))
+            total_value = int(round(unit_price * qty * 100))
+        except Exception:
+            total_value = 100
 
-        item_grams = max(1, int(item.get("grams", 500) or 500) * qty)
-        item_title = str(item.get("title", "Merce varia"))[:30]
-
-        item_payload = {
+        items.append({
             "itemNumber": str(idx),
-            "description": item_title,
+            "description": trunc(str(item.get("title", "Articolo")), 30),
             "quantity": str(qty),
-            "totalValue": str(max(1, item_total)),
-            "totalWeight": str(item_grams),
+            "totalValue": str(max(1, total_value)),
+            "totalWeight": str(max(1, total_item_weight)),
             "originCountry": "IT",
-        }
-        if paese in {"GB", "CH", "NO"}:
-            item_payload["taric"] = "0000000000"
-        items.append(item_payload)
+            "taric": "0000000000",
+        })
 
-    force_receiver_type = (os.environ.get("POSTE_INTL_RECEIVER_TYPE", "") or "").strip().lower()
-    if force_receiver_type in {"business", "businessdelivery"}:
-        receiver_type = "businessDelivery"
-    elif force_receiver_type in {"retail", "retaildelivery"}:
-        receiver_type = "retailDelivery"
-    else:
-        receiver_type = "businessDelivery" if shipping.get("company") else "retailDelivery"
+    total_weight = max(1, total_weight)
+    receiver_type = "businessDelivery" if company else "retailDelivery"
 
-    full_name = f"{shipping.get('first_name', '')} {shipping.get('last_name', '')}".strip() or "CLIENTE"
-    company = shipping.get("company", "")
-    name_surname = company or full_name
-    address = shipping.get("address1", "")
-    if shipping.get("address2"):
-        address = f"{address} {shipping.get('address2')}".strip()
-
-    phone_raw = shipping.get("phone", "") or ordine.get("phone", "") or ""
-    # Pulizia telefono: solo cifre e + iniziale, max 15 caratteri
-    phone_clean = phone_raw.strip()
-    if phone_clean.startswith("+"):
-        phone = "+" + "".join(c for c in phone_clean[1:] if c.isdigit())
-    else:
-        phone = "".join(c for c in phone_clean if c.isdigit())
-    phone = phone[:15]
-    # Se vuoto usa fallback
-    if not phone:
-        phone = "+390000000000"
-
-    payload = {
-        "costCenterCode": POSTE_COST_CENTER,
-        "paperless": paperless,
-        "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
-        "waybills": [{
-            "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
-            "printFormat": "A4",
-            "product": "APT001013",
-            "data": {
-                "declared": [{
-                    "weight": str(peso_grammi),
-                    "height": "10",
-                    "length": "30",
-                    "width": "25",
-                    "packagingCode": "box",
+    def build_payload(receiver_type_value):
+        return {
+            "costCenterCode": POSTE_COST_CENTER,
+            "paperless": paperless,
+            "shipmentDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
+            "waybills": [{
+                "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
+                "printFormat": "A4",
+                "product": "APT001013",
+                "data": {
+                    "declared": [{
+                        "weight": str(total_weight),
+                        "height": "10",
+                        "length": "30",
+                        "width": "25",
+                        "packagingCode": "C"
+                    }],
                     "description": description,
-                }],
-                "content": description,
-                "description": description,
-                "items": items,
-                "services": {},
-                "international": {
-                    "receiverType": receiver_type,
-                    "contentCode": "999",
-                },
-                "sender": MITTENTE,
-                "receiver": {
-                    "zipCode": shipping.get("zip", "")[:7],
-                    "addressId": "",
-                    "streetNumber": "",
-                    "city": shipping.get("city", "").upper()[:30],
-                    "address": address[:40],
-                    "country": country_code,
-                    "countryName": country_name[:30],
-                    "nameSurname": name_surname[:35],
-                    "contactName": full_name[:35],
-                    "province": "",
-                    "email": ordine.get("email", "")[:50],
-                    "phone": phone[:15],
-                    "cellphone": phone[:15],
-                    "note1": "",
-                    "note2": "",
+                    "services": {},
+                    "items": items,
+                    "international": {
+                        "receiverType": receiver_type_value,
+                        "contentCode": "999"
+                    },
+                    "sender": MITTENTE,
+                    "receiver": {
+                        "zipCode": zip_code,
+                        "addressId": "",
+                        "streetNumber": street_number,
+                        "city": city,
+                        "address": street,
+                        "country": country_code,
+                        "countryName": trunc(country_name, 30),
+                        "nameSurname": name_surname,
+                        "contactName": contact_name,
+                        "province": province,
+                        "email": email,
+                        "phone": phone,
+                        "cellphone": phone,
+                        "note1": "",
+                        "note2": "",
+                    }
                 }
-            }
-        }]
-    }
+            }]
+        }
 
     headers = {
         "POSTE_clientID": POSTE_CLIENT_ID,
@@ -326,30 +339,28 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
         "Content-Type": "application/json"
     }
 
-    def _post_payload(current_payload):
-        print(f"PAYLOAD INTERNAZIONALE: {json.dumps(current_payload, ensure_ascii=False)}")
-        resp = requests.post(WAYBILL_URL, json=current_payload, headers=headers, timeout=15)
+    attempts = [receiver_type]
+    alt = "retailDelivery" if receiver_type == "businessDelivery" else "businessDelivery"
+    if alt not in attempts:
+        attempts.append(alt)
+
+    last_json = None
+    for idx, candidate in enumerate(attempts, start=1):
+        payload = build_payload(candidate)
+        print(f"PAYLOAD INTERNAZIONALE TENTATIVO {idx}: {json.dumps(payload, ensure_ascii=False)}")
+        resp = requests.post(WAYBILL_URL, json=payload, headers=headers, timeout=20)
         resp.raise_for_status()
-        return resp.json()
+        response_json = resp.json()
+        log_poste_response(f"RISPOSTA POSTE INTL TENTATIVO {idx}", response_json)
+        last_json = response_json
+        error_desc = str(response_json.get("result", {}).get("errorDescription", ""))
+        error_code = response_json.get("result", {}).get("errorCode")
+        if error_code in (0, "0", None):
+            return response_json
+        if "carriers non compatibili" not in error_desc.lower():
+            return response_json
 
-    result = _post_payload(payload)
-    error_desc = str(result.get("result", {}).get("errorDescription", "") or "")
-
-    # Fallback pragmatico: se Poste rifiuta per incompatibilità carrier,
-    # ritenta con il tipo opposto (Retail <-> Business).
-    if "carriers non compatibili" in error_desc.lower():
-        current_type = payload["waybills"][0]["data"]["international"].get("receiverType", "retailDelivery")
-        alternate_type = "businessDelivery" if current_type == "retailDelivery" else "retailDelivery"
-        payload_retry = json.loads(json.dumps(payload))
-        payload_retry["waybills"][0]["data"]["international"]["receiverType"] = alternate_type
-        print(f"Retry internazionale con receiverType={alternate_type}")
-        retry_result = _post_payload(payload_retry)
-        retry_error = retry_result.get("result", {}).get("errorCode")
-        if retry_error in (0, "0", None):
-            return retry_result
-        return retry_result
-
-    return result
+    return last_json or {"result": {"errorCode": 999, "errorDescription": "Errore internazionale sconosciuto"}}
 
 
 def crea_spedizione_poste(ordine, paperless=False):
