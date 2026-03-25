@@ -229,7 +229,7 @@ def crea_spedizione_italia(ordine, token, paperless=False):
             "product": "APT000901",
             "data": {
                 "declared": [{
-                    "weight": str(peso_kg * 1000),
+                    "weight": peso_kg * 1000,
                     "height": h, "length": l, "width": w
                 }],
                 "content": "Merce varia",
@@ -305,7 +305,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
             total_value = 100
 
         items.append({
-            "itemNumber": str(idx),
+            "itemNumber": str(idx)[:1],
             "description": trunc(str(item.get("title", "Articolo")), 30),
             "quantity": str(qty),
             "totalValue": str(max(1, total_value)),
@@ -333,7 +333,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                 "product": "APT001013",
                 "data": {
                     "declared": [{
-                        "weight": str(total_weight),
+                        "weight": total_weight,
                         "height": h,
                         "length": l,
                         "width": w,
