@@ -254,6 +254,7 @@ def crea_spedizione_italia(ordine, token, paperless=False):
                     "height": h, "length": l, "width": w
                 }],
                 "content": "Merce varia",
+                "services": {},
                 "sender": MITTENTE,
                 "receiver": {
                     "zipCode": shipping.get("zip", ""),
