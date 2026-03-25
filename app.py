@@ -596,7 +596,7 @@ def nations():
             "Content-Type": "application/json"
         }
         url = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/international/nations"
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.post(url, json={}, headers=headers, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         # Filtra solo i paesi che supportano APT001013
