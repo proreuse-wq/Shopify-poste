@@ -190,7 +190,7 @@ def stima_dimensioni(peso_kg):
         return "30", "60", "40"
 
 
-
+def get_poste_token():
     now = time.time()
     if _token_cache["access_token"] and now < _token_cache["expires_at"] - 60:
         return _token_cache["access_token"]
