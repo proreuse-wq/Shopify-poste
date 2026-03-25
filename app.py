@@ -77,8 +77,29 @@ def clean_phone(value):
     return result or _mittente_phone_normalized()
 
 
+def sanitize(value, n):
+    """Rimuove caratteri non-ASCII e tronca a n caratteri.
+    Poste rifiuta caratteri speciali come ß, é, ü nei campi stringa.
+    """
+    import unicodedata
+    v = unicodedata.normalize("NFKD", (value or ""))
+    v = v.encode("ascii", "ignore").decode("ascii")
+    return v[:n].strip()
+
+
 def trunc(value, n):
     return (value or "")[:n]
+
+
+def split_address(address1, address2=""):
+    raw = f"{address1 or ''} {address2 or ''}".strip()
+    raw = re.sub(r"\s+", " ", raw)
+    # Sanitizza prima di estrarre numero civico
+    raw = sanitize(raw, 200)
+    m = re.search(r"\b(\d+[A-Za-z]?)\b", raw)
+    street_number = m.group(1)[:4] if m else ""
+    street = raw.replace(m.group(0), "", 1).strip(" ,") if m else raw
+    return trunc(street, 40), trunc(street_number, 4)
 
 
 def split_address(address1, address2=""):
@@ -271,9 +292,9 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
         raise RuntimeError(f"Paese non supportato da mappa ISO4: {paese_iso2}")
 
     country_name = shipping.get("country") or billing.get("country") or paese_iso2
-    city = trunc((shipping.get("city") or billing.get("city") or "").upper(), 30)
+    city = sanitize((shipping.get("city") or billing.get("city") or "").upper(), 30)
     province = trunc((shipping.get("province_code") or billing.get("province_code") or "").upper(), 2)
-    zip_code = trunc(shipping.get("zip") or billing.get("zip") or "", 10)
+    zip_code = trunc(shipping.get("zip") or billing.get("zip") or "", 7)
 
     street, street_number = split_address(shipping.get("address1") or billing.get("address1") or "",
                                           shipping.get("address2") or billing.get("address2") or "")
@@ -282,8 +303,8 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
     last_name = shipping.get("last_name") or billing.get("last_name") or ""
     company = shipping.get("company") or billing.get("company") or ""
     full_name = (f"{first_name} {last_name}").strip() or company or "CLIENTE"
-    name_surname = trunc(company or full_name, 35)
-    contact_name = trunc(full_name, 35)
+    name_surname = sanitize(company or full_name, 35)
+    contact_name = sanitize(full_name, 35)
 
     phone = clean_phone(shipping.get("phone") or billing.get("phone") or ordine.get("phone") or "")
     email = trunc(ordine.get("email") or "cliente@example.com", 50)
@@ -357,7 +378,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                         "city": city,
                         "address": street,
                         "country": country_code,
-                        "countryName": trunc(country_name, 30),
+                        "countryName": sanitize(country_name, 30),
                         "nameSurname": name_surname,
                         "contactName": contact_name,
                         "province": province,
@@ -440,6 +461,7 @@ def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
         resp_fo.raise_for_status()
         fulfillment_orders = resp_fo.json().get("fulfillment_orders", [])
         if not fulfillment_orders:
+            print(f"Nessun fulfillment_order per ordine #{order_number}")
             return False
         line_items_by_fulfillment = [
             {"fulfillment_order_id": fo["id"]}
@@ -447,6 +469,18 @@ def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
             if fo.get("status") in ("open", "in_progress")
         ]
         if not line_items_by_fulfillment:
+            # Ordine già fulfilled — aggiorna solo il tracking sull'existing fulfillment
+            print(f"Ordine #{order_number} già evaso, tento aggiornamento tracking diretto")
+            existing = [fo for fo in fulfillment_orders if fo.get("status") == "closed"]
+            if existing:
+                fulfillment_id = existing[0].get("assigned_fulfillment_order_id") or existing[0].get("id")
+                url_upd = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments/{fulfillment_id}/update_tracking.json"
+                upd_payload = {"fulfillment": {"notify_customer": False, "tracking_info": {
+                    "company": "Poste Italiane", "number": ldv,
+                    "url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}"
+                }}}
+                resp_upd = requests.post(url_upd, json=upd_payload, headers=headers, timeout=10)
+                print(f"Update tracking esistente: {resp_upd.status_code} {resp_upd.text[:200]}")
             return False
         url_f = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments.json"
         payload = {
@@ -460,7 +494,9 @@ def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
             }
         }
         resp = requests.post(url_f, json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
+        if not resp.ok:
+            print(f"Errore Shopify {resp.status_code}: {resp.text[:300]}")
+            return False
         print(f"Tracking aggiornato su Shopify per ordine #{order_number}: {ldv}")
         return True
     except Exception as e:
