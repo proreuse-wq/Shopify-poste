@@ -377,10 +377,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                     "services": services,
                     "items": items,
                     "international": {
-                        # receiverType: "retailDelivery" (privato) o "businessDelivery" (azienda)
-                        # contentCode: "2" = merce commerciale (valore generico per APT001013)
                         "receiverType": receiver_type_value,
-                        "contentCode": "2"
                     },
                     "sender": MITTENTE,
                     "receiver": {
