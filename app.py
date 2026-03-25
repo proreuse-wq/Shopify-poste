@@ -14,7 +14,17 @@ POSTE_CLIENT_ID = os.environ.get("POSTE_CLIENT_ID", "")
 POSTE_SECRET_ID = os.environ.get("POSTE_SECRET_ID", "")
 POSTE_COST_CENTER = "CDC-00080197"
 
-MITTENTE_PHONE = os.environ.get("MITTENTE_PHONE", "+393775435992")
+def _normalize_phone(v):
+    """Converte +39... in 0039... come richiesto dal manuale Poste per l'internazionale."""
+    v = (v or "").strip()
+    if v.startswith("+"):
+        v = "00" + v[1:]
+    return "".join(ch for ch in v if ch.isdigit())[:15]
+
+MITTENTE_PHONE = _normalize_phone(os.environ.get("MITTENTE_PHONE", "+393775435992"))
+
+def _mittente_phone_normalized():
+    return MITTENTE_PHONE
 
 MITTENTE = {
     "zipCode": "10070", "streetNumber": "30", "city": "VALLO TORINESE",
@@ -54,15 +64,17 @@ def salva_ordini(ordini):
         pass
 
 def clean_phone(value):
+    """Normalizza il telefono al formato 00<prefisso><numero> richiesto da Poste
+    per spedizioni internazionali (es. +393771234567 → 00393771234567).
+    """
     v = (value or "").strip()
-    out = []
-    for i, ch in enumerate(v):
-        if ch.isdigit():
-            out.append(ch)
-        elif ch == "+" and i == 0:
-            out.append(ch)
-    result = "".join(out)[:15]
-    return result or MITTENTE_PHONE
+    # Sostituisce il + iniziale con 00
+    if v.startswith("+"):
+        v = "00" + v[1:]
+    digits = "".join(ch for ch in v if ch.isdigit())
+    result = digits[:15]
+    # Fallback al telefono mittente (già normalizzato a 00...)
+    return result or _mittente_phone_normalized()
 
 
 def trunc(value, n):
@@ -162,7 +174,23 @@ def calcola_prezzo_italia(peso_kg):
     return 9700
 
 
-def get_poste_token():
+def stima_dimensioni(peso_kg):
+    """Stima dimensioni realistiche del collo in base al peso (valori in cm interi).
+    Restituisce (height, length, width) come stringhe.
+    """
+    if peso_kg <= 1:
+        return "10", "20", "15"
+    elif peso_kg <= 5:
+        return "15", "30", "20"
+    elif peso_kg <= 10:
+        return "20", "40", "30"
+    elif peso_kg <= 20:
+        return "25", "50", "35"
+    else:
+        return "30", "60", "40"
+
+
+
     now = time.time()
     if _token_cache["access_token"] and now < _token_cache["expires_at"] - 60:
         return _token_cache["access_token"]
@@ -189,6 +217,8 @@ def crea_spedizione_italia(ordine, token, paperless=False):
     )
     peso_kg = max(1, round(peso_grammi / 1000))
 
+    h, l, w = stima_dimensioni(peso_kg)
+
     payload = {
         "costCenterCode": POSTE_COST_CENTER,
         "paperless": paperless,
@@ -200,7 +230,7 @@ def crea_spedizione_italia(ordine, token, paperless=False):
             "data": {
                 "declared": [{
                     "weight": str(peso_kg * 1000),
-                    "height": "10", "length": "30", "width": "25"
+                    "height": h, "length": l, "width": w
                 }],
                 "content": "Merce varia",
                 "sender": MITTENTE,
@@ -280,11 +310,16 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
             "quantity": str(qty),
             "totalValue": str(max(1, total_value)),
             "totalWeight": str(max(1, total_item_weight)),
+            # PAESE_ORIGINE: codice ISO2 del paese di produzione - default IT (Italia)
             "originCountry": "IT",
-            "taric": "0000000000",
+            # TARIC: codice internazionale merci - "39269090" = articoli vari in plastica
+            # (codice generico accettato da Poste; aggiornare per categorie specifiche)
+            "taric": "39269090",
         })
 
     total_weight = max(1, total_weight)
+    total_weight_kg = total_weight / 1000
+    h, l, w = stima_dimensioni(total_weight_kg)
     receiver_type = "businessDelivery" if company else "retailDelivery"
 
     def build_payload(receiver_type_value):
@@ -299,17 +334,19 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                 "data": {
                     "declared": [{
                         "weight": str(total_weight),
-                        "height": "10",
-                        "length": "30",
-                        "width": "25",
+                        "height": h,
+                        "length": l,
+                        "width": w,
                         "packagingCode": "C"
                     }],
                     "description": description,
                     "services": {},
                     "items": items,
                     "international": {
+                        # receiverType: "retailDelivery" (privato) o "businessDelivery" (azienda)
+                        # contentCode: "2" = merce commerciale (valore generico per APT001013)
                         "receiverType": receiver_type_value,
-                        "contentCode": "999"
+                        "contentCode": "2"
                     },
                     "sender": MITTENTE,
                     "receiver": {
