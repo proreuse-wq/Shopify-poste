@@ -385,8 +385,6 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                     "sender": MITTENTE,
                     "receiver": {
                         "zipCode": zip_code,
-                        "addressId": "",
-                        "streetNumber": street_number,
                         "city": city,
                         "address": street,
                         "country": country_code,
