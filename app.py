@@ -102,15 +102,6 @@ def split_address(address1, address2=""):
     return trunc(street, 40), trunc(street_number, 4)
 
 
-def split_address(address1, address2=""):
-    raw = f"{address1 or ''} {address2 or ''}".strip()
-    raw = re.sub(r"\s+", " ", raw)
-    m = re.search(r"\b(\d+[A-Za-z]?)\b", raw)
-    street_number = m.group(1)[:4] if m else ""
-    street = raw.replace(m.group(0), "", 1).strip(" ,") if m else raw
-    return trunc(street, 40), trunc(street_number, 4)
-
-
 def iso4_from_iso2(country_code):
     cc = (country_code or "").upper().strip()
     return ISO2_TO_ISO4.get(cc, "")
