@@ -337,7 +337,8 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                         "height": h,
                         "length": l,
                         "width": w,
-                        "packagingCode": "C"
+                        "packagingCode": "C",
+                        "description": description
                     }],
                     "description": description,
                     "services": {},
