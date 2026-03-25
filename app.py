@@ -221,15 +221,39 @@ def get_poste_token():
     return _token_cache["access_token"]
 
 
-def crea_spedizione_italia(ordine, token, paperless=False):
+def get_num_colli(ordine):
+    """Legge il tag 'colli:N' dall'ordine Shopify. Default 1."""
+    tags = ordine.get("tags", "") or ""
+    for tag in tags.split(","):
+        tag = tag.strip().lower()
+        if tag.startswith("colli:"):
+            try:
+                n = int(tag.split(":")[1])
+                return max(1, min(n, 10))  # limite 1-10 colli
+            except ValueError:
+                pass
+    return 1
+
+
+def build_declared(num_colli, peso_grammi_totale, h, l, w, extra_fields=None):
+    """Costruisce la lista declared[] distribuendo il peso equamente sui colli."""
+    peso_per_collo = max(1, peso_grammi_totale // num_colli)
+    collo = {"weight": peso_per_collo, "height": h, "length": l, "width": w}
+    if extra_fields:
+        collo.update(extra_fields)
+    return [collo] * num_colli
+
+
+
     shipping = ordine.get("shipping_address", {})
     peso_grammi = sum(
         item.get("grams", 500) * item.get("quantity", 1)
         for item in ordine.get("line_items", [])
     )
     peso_kg = max(1, round(peso_grammi / 1000))
-
-    h, l, w = stima_dimensioni(peso_kg)
+    num_colli = get_num_colli(ordine)
+    h, l, w = stima_dimensioni(peso_kg / num_colli)
+    services = {"APT000945": {}} if num_colli > 1 else {}
 
     payload = {
         "costCenterCode": POSTE_COST_CENTER,
@@ -240,12 +264,9 @@ def crea_spedizione_italia(ordine, token, paperless=False):
             "printFormat": "A4",
             "product": "APT000901",
             "data": {
-                "declared": [{
-                    "weight": peso_kg * 1000,
-                    "height": h, "length": l, "width": w
-                }],
+                "declared": build_declared(num_colli, peso_grammi, h, l, w),
                 "content": "Merce varia",
-                "services": {},
+                "services": services,
                 "sender": MITTENTE,
                 "receiver": {
                     "zipCode": shipping.get("zip", ""),
@@ -332,10 +353,12 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
 
     total_weight = max(1, total_weight)
     total_weight_kg = total_weight / 1000
-    h, l, w = stima_dimensioni(total_weight_kg)
+    num_colli = get_num_colli(ordine)
+    h, l, w = stima_dimensioni(total_weight_kg / num_colli)
     receiver_type = "businessDelivery" if company else "retailDelivery"
 
     def build_payload(receiver_type_value):
+        services = {"APT000945": {}} if num_colli > 1 else {}
         return {
             "costCenterCode": POSTE_COST_CENTER,
             "paperless": paperless,
@@ -345,16 +368,10 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                 "printFormat": "A4",
                 "product": "APT001013",
                 "data": {
-                    "declared": [{
-                        "weight": total_weight,
-                        "height": h,
-                        "length": l,
-                        "width": w,
-                        "packagingCode": "C",
-                        "description": description
-                    }],
+                    "declared": build_declared(num_colli, total_weight, h, l, w,
+                                               {"packagingCode": "C", "description": description}),
                     "description": description,
-                    "services": {},
+                    "services": services,
                     "items": items,
                     "international": {
                         # receiverType: "retailDelivery" (privato) o "businessDelivery" (azienda)
