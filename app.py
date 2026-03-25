@@ -389,10 +389,10 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                         "countryName": sanitize(country_name, 30),
                         "nameSurname": name_surname,
                         "contactName": contact_name,
-                        "province": province,
                         "email": email,
                         "phone": phone,
                         "cellphone": phone,
+                        **( {"province": province} if province else {} ),
                         "note1": "",
                         "note2": "",
                     }
@@ -585,7 +585,33 @@ def tracking(ldv):
     return jsonify({"error": "Tracking non disponibile"}), 404
 
 
-@app.route("/webhook/order-created", methods=["POST"])
+@app.route("/nations", methods=["GET"])
+def nations():
+    """Debug: ritorna i paesi abilitati per APT001013 sul contratto."""
+    try:
+        token = get_poste_token()
+        headers = {
+            "POSTE_clientID": POSTE_CLIENT_ID,
+            "Authorization": token,
+            "Content-Type": "application/json"
+        }
+        url = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/international/nations"
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        # Filtra solo i paesi che supportano APT001013
+        countries = data.get("countries", [])
+        abilitati = [
+            {"iso2": c["iso2"], "iso4": c["iso4"], "name": c.get("name", "")}
+            for c in countries
+            if "APT001013" in c.get("products", []) and c.get("active")
+        ]
+        return jsonify({"totale": len(abilitati), "paesi": abilitati}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
 def order_created():
     return jsonify({"status": "ok"}), 200
 
