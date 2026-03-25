@@ -244,7 +244,7 @@ def build_declared(num_colli, peso_grammi_totale, h, l, w, extra_fields=None):
     return [collo] * num_colli
 
 
-
+def crea_spedizione_italia(ordine, token, paperless=False):
     shipping = ordine.get("shipping_address", {})
     peso_grammi = sum(
         item.get("grams", 500) * item.get("quantity", 1)
@@ -309,8 +309,11 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
     province = trunc((shipping.get("province_code") or billing.get("province_code") or "").upper(), 2)
     zip_code = trunc(shipping.get("zip") or billing.get("zip") or "", 7)
 
-    street, street_number = split_address(shipping.get("address1") or billing.get("address1") or "",
-                                          shipping.get("address2") or billing.get("address2") or "")
+    # Per l'internazionale mettiamo tutto in address e streetNumber vuoto
+    # (alcuni paesi non accettano streetNumber separato)
+    raw_address = f"{shipping.get('address1') or billing.get('address1') or ''} {shipping.get('address2') or billing.get('address2') or ''}".strip()
+    street = sanitize(raw_address, 40)
+    street_number = ""
 
     first_name = shipping.get("first_name") or billing.get("first_name") or ""
     last_name = shipping.get("last_name") or billing.get("last_name") or ""
