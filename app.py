@@ -121,16 +121,16 @@ PAESE_ZONA = {
     "GB": 10,
 }
 
-# ─── MAPPA ISO2 → ISO4 ─────────────────────────────────────────────────────────
+# ─── MAPPA ISO2 → ISO4 (codici Poste Italiane, da API /international/nations) ──
 ISO2_TO_ISO4 = {
-    "AT": "AUT1", "BE": "BEL1", "BG": "BGR1", "HR": "HRV1",
-    "CY": "CYP1", "CZ": "CZE1", "DK": "DNK1", "EE": "EST1",
-    "FI": "FIN1", "FR": "FRA1", "DE": "DEU1", "GR": "GRC1",
-    "HU": "HUN1", "IE": "IRL1", "LV": "LVA1", "LT": "LTU1",
-    "LU": "LUX1", "MT": "MLT1", "NL": "NLD1", "PL": "POL1",
-    "PT": "PRT1", "RO": "ROU1", "SK": "SVK1", "SI": "SVN1",
-    "ES": "ESP1", "SE": "SWE1", "GB": "GBR1", "NO": "NOR1",
-    "CH": "CHE1", "LI": "LIE1", "MC": "MCO1",
+    "AT": "AUT1", "BE": "BEL1", "BG": "BUL1", "HR": "CRO1",
+    "CY": "CIP1", "CZ": "RCE1", "DK": "DAN1", "EE": "EST1",
+    "FI": "FIN1", "FR": "FRA1", "DE": "GER2", "GR": "GRE1",
+    "HU": "UNG1", "IE": "IRL1", "LV": "LET1", "LT": "LIT1",
+    "LU": "LUS1", "MT": "MAL3", "NL": "OLA1", "PL": "POL1",
+    "PT": "POR1", "RO": "ROM1", "SK": "SLO1", "SI": "SLO2",
+    "ES": "SPA1", "SE": "SVE1", "GB": "GBR1", "NO": "NOR1",
+    "CH": "SVI1", "LI": "LIE1", "MC": "MON4",
 }
 
 # ─── TARIFFE INTERNAZIONALI (centesimi) ────────────────────────────────────────
