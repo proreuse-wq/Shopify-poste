@@ -378,6 +378,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
                     "items": items,
                     "international": {
                         "receiverType": receiver_type_value,
+                        "contentCode": "11"
                     },
                     "sender": MITTENTE,
                     "receiver": {
