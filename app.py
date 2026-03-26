@@ -464,52 +464,69 @@ def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
             "X-Shopify-Access-Token": SHOPIFY_TOKEN,
             "Content-Type": "application/json"
         }
+        tracking_info = {
+            "company": "Poste Italiane",
+            "number": ldv,
+            "url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}"
+        }
+
+        # Prima prova: fulfillment_orders per ordini non ancora evasi
         url_fo = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillment_orders.json"
         resp_fo = requests.get(url_fo, headers=headers, timeout=10)
-        resp_fo.raise_for_status()
-        fulfillment_orders = resp_fo.json().get("fulfillment_orders", [])
-        if not fulfillment_orders:
-            print(f"Nessun fulfillment_order per ordine #{order_number}")
-            return False
-        line_items_by_fulfillment = [
-            {"fulfillment_order_id": fo["id"]}
-            for fo in fulfillment_orders
-            if fo.get("status") in ("open", "in_progress")
-        ]
-        if not line_items_by_fulfillment:
-            # Ordine già fulfilled — aggiorna solo il tracking sull'existing fulfillment
-            print(f"Ordine #{order_number} già evaso, tento aggiornamento tracking diretto")
-            existing = [fo for fo in fulfillment_orders if fo.get("status") == "closed"]
-            if existing:
-                fulfillment_id = existing[0].get("assigned_fulfillment_order_id") or existing[0].get("id")
+
+        if resp_fo.ok:
+            fulfillment_orders = resp_fo.json().get("fulfillment_orders", [])
+            open_fos = [fo for fo in fulfillment_orders if fo.get("status") in ("open", "in_progress")]
+
+            if open_fos:
+                # Ordine non ancora evaso — crea fulfillment con tracking
+                url_f = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments.json"
+                payload = {
+                    "fulfillment": {
+                        "line_items_by_fulfillment_order": [{"fulfillment_order_id": fo["id"]} for fo in open_fos],
+                        "tracking_info": tracking_info,
+                        "notify_customer": True
+                    }
+                }
+                resp = requests.post(url_f, json=payload, headers=headers, timeout=10)
+                if resp.ok:
+                    print(f"Fulfillment creato con tracking per ordine #{order_number}: {ldv}")
+                    return True
+                else:
+                    print(f"Errore creazione fulfillment: {resp.status_code} {resp.text[:300]}")
+
+        # Seconda prova: cerca fulfillments esistenti sull'ordine e aggiorna il tracking
+        url_fulfillments = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillments.json"
+        resp_ff = requests.get(url_fulfillments, headers=headers, timeout=10)
+
+        if resp_ff.ok:
+            fulfillments = resp_ff.json().get("fulfillments", [])
+            if fulfillments:
+                # Aggiorna il tracking sull'ultimo fulfillment
+                fulfillment_id = fulfillments[-1]["id"]
                 url_upd = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments/{fulfillment_id}/update_tracking.json"
-                upd_payload = {"fulfillment": {"notify_customer": False, "tracking_info": {
-                    "company": "Poste Italiane", "number": ldv,
-                    "url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}"
-                }}}
+                upd_payload = {
+                    "fulfillment": {
+                        "notify_customer": True,
+                        "tracking_info": tracking_info
+                    }
+                }
                 resp_upd = requests.post(url_upd, json=upd_payload, headers=headers, timeout=10)
-                print(f"Update tracking esistente: {resp_upd.status_code} {resp_upd.text[:200]}")
-            return False
-        url_f = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments.json"
-        payload = {
-            "fulfillment": {
-                "line_items_by_fulfillment_order": line_items_by_fulfillment,
-                "tracking_info": {
-                    "company": "Poste Italiane", "number": ldv,
-                    "url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}"
-                },
-                "notify_customer": True
-            }
-        }
-        resp = requests.post(url_f, json=payload, headers=headers, timeout=10)
-        if not resp.ok:
-            print(f"Errore Shopify {resp.status_code}: {resp.text[:300]}")
-            return False
-        print(f"Tracking aggiornato su Shopify per ordine #{order_number}: {ldv}")
-        return True
+                if resp_upd.ok:
+                    print(f"Tracking aggiornato su fulfillment esistente per ordine #{order_number}: {ldv}")
+                    return True
+                else:
+                    print(f"Errore update tracking: {resp_upd.status_code} {resp_upd.text[:300]}")
+            else:
+                print(f"Nessun fulfillment trovato per ordine #{order_number}")
+        else:
+            print(f"Errore lettura fulfillments: {resp_ff.status_code} {resp_ff.text[:200]}")
+
+        return False
     except Exception as e:
         print(f"Errore aggiornamento tracking Shopify: {e}")
         return False
+
 
 
 # ─── ROUTE ─────────────────────────────────────────────────────────────────────
@@ -607,6 +624,32 @@ def nations():
             if "APT001013" in c.get("products", []) and c.get("active")
         ]
         return jsonify({"totale": len(abilitati), "paesi": abilitati}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/callback", methods=["GET"])
+def callback():
+    """Callback OAuth Shopify — scambia il code con il token di accesso."""
+    code = request.args.get("code", "")
+    shop = request.args.get("shop", "")
+    if not code or not shop:
+        return "Mancano code o shop", 400
+    try:
+        resp = requests.post(
+            f"https://{shop}/admin/oauth/access_token",
+            json={
+                "client_id": os.environ.get("SHOPIFY_CLIENT_ID", ""),
+                "client_secret": os.environ.get("SHOPIFY_CLIENT_SECRET", ""),
+                "code": code
+            },
+            timeout=10
+        )
+        data = resp.json()
+        token = data.get("access_token", "")
+        scope = data.get("scope", "")
+        print(f"NUOVO TOKEN SHOPIFY: {token} | SCOPE: {scope}")
+        return jsonify({"access_token": token, "scope": scope}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
