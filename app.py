@@ -470,58 +470,91 @@ def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
             "url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}"
         }
 
-        # Prima prova: fulfillment_orders per ordini non ancora evasi
+        print(f"[TRACKING] Ordine #{order_number} - avvio aggiornamento tracking LDV {ldv}")
+        print(f"[TRACKING] SHOPIFY_SHOP={SHOPIFY_SHOP}")
+        print(f"[TRACKING] TOKEN PRESENTE={'SI' if SHOPIFY_TOKEN else 'NO'}")
+
+        # 1) Prima prova: fulfillment_orders aperti -> crea fulfillment con tracking
         url_fo = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillment_orders.json"
         resp_fo = requests.get(url_fo, headers=headers, timeout=10)
+        print(f"[TRACKING] fulfillment_orders status={resp_fo.status_code} body={resp_fo.text[:500]}")
 
         if resp_fo.ok:
             fulfillment_orders = resp_fo.json().get("fulfillment_orders", [])
             open_fos = [fo for fo in fulfillment_orders if fo.get("status") in ("open", "in_progress")]
 
             if open_fos:
-                # Ordine non ancora evaso — crea fulfillment con tracking
                 url_f = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments.json"
                 payload = {
                     "fulfillment": {
-                        "line_items_by_fulfillment_order": [{"fulfillment_order_id": fo["id"]} for fo in open_fos],
+                        "line_items_by_fulfillment_order": [
+                            {"fulfillment_order_id": fo["id"]} for fo in open_fos
+                        ],
                         "tracking_info": tracking_info,
                         "notify_customer": True
                     }
                 }
+
+                print(f"[TRACKING] Provo creazione fulfillment con tracking: {json.dumps(payload)}")
                 resp = requests.post(url_f, json=payload, headers=headers, timeout=10)
+                print(f"[TRACKING] create fulfillment status={resp.status_code} body={resp.text[:500]}")
+
                 if resp.ok:
                     print(f"Fulfillment creato con tracking per ordine #{order_number}: {ldv}")
                     return True
-                else:
-                    print(f"Errore creazione fulfillment: {resp.status_code} {resp.text[:300]}")
 
-        # Seconda prova: cerca fulfillments esistenti sull'ordine e aggiorna il tracking
-        url_fulfillments = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillments.json"
-        resp_ff = requests.get(url_fulfillments, headers=headers, timeout=10)
+        # 2) Seconda prova: fulfillment già esistente -> aggiorna quello giusto
+        for tentativo in range(3):
+            if tentativo > 0:
+                time.sleep(2)
 
-        if resp_ff.ok:
+            url_fulfillments = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{ordine_id}/fulfillments.json"
+            resp_ff = requests.get(url_fulfillments, headers=headers, timeout=10)
+            print(
+                f"[TRACKING] Tentativo {tentativo + 1} lettura fulfillments "
+                f"status={resp_ff.status_code} body={resp_ff.text[:800]}"
+            )
+
+            if not resp_ff.ok:
+                continue
+
             fulfillments = resp_ff.json().get("fulfillments", [])
-            if fulfillments:
-                # Aggiorna il tracking sull'ultimo fulfillment
-                fulfillment_id = fulfillments[-1]["id"]
-                url_upd = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments/{fulfillment_id}/update_tracking.json"
-                upd_payload = {
-                    "fulfillment": {
-                        "notify_customer": True,
-                        "tracking_info": tracking_info
-                    }
-                }
-                resp_upd = requests.post(url_upd, json=upd_payload, headers=headers, timeout=10)
-                if resp_upd.ok:
-                    print(f"Tracking aggiornato su fulfillment esistente per ordine #{order_number}: {ldv}")
-                    return True
-                else:
-                    print(f"Errore update tracking: {resp_upd.status_code} {resp_upd.text[:300]}")
-            else:
-                print(f"Nessun fulfillment trovato per ordine #{order_number}")
-        else:
-            print(f"Errore lettura fulfillments: {resp_ff.status_code} {resp_ff.text[:200]}")
+            if not fulfillments:
+                print(f"[TRACKING] Nessun fulfillment trovato al tentativo {tentativo + 1}")
+                continue
 
+            validi = [f for f in fulfillments if f.get("status") != "cancelled"]
+            if not validi:
+                print("[TRACKING] Trovati solo fulfillments cancellati")
+                continue
+
+            validi.sort(key=lambda x: x.get("created_at", ""))
+            fulfillment = validi[-1]
+            fulfillment_id = fulfillment["id"]
+
+            print(
+                f"[TRACKING] Fulfillment scelto: id={fulfillment_id}, "
+                f"status={fulfillment.get('status')}, "
+                f"tracking_number={fulfillment.get('tracking_number')}"
+            )
+
+            url_upd = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/fulfillments/{fulfillment_id}/update_tracking.json"
+            upd_payload = {
+                "fulfillment": {
+                    "notify_customer": True,
+                    "tracking_info": tracking_info
+                }
+            }
+
+            print(f"[TRACKING] POST update_tracking su fulfillment {fulfillment_id}: {json.dumps(upd_payload)}")
+            resp_upd = requests.post(url_upd, json=upd_payload, headers=headers, timeout=10)
+            print(f"[TRACKING] update_tracking status={resp_upd.status_code} body={resp_upd.text[:800]}")
+
+            if resp_upd.ok:
+                print(f"Tracking aggiornato su fulfillment esistente per ordine #{order_number}: {ldv}")
+                return True
+
+        print(f"[TRACKING] Impossibile aggiornare tracking per ordine #{order_number}")
         return False
     except Exception as e:
         print(f"Errore aggiornamento tracking Shopify: {e}")
