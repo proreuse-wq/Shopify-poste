@@ -13,6 +13,8 @@ app = Flask(__name__)
 POSTE_CLIENT_ID = os.environ.get("POSTE_CLIENT_ID", "")
 POSTE_SECRET_ID = os.environ.get("POSTE_SECRET_ID", "")
 POSTE_COST_CENTER = "CDC-00080197"
+POSTE_PRINT_FORMAT = os.environ.get("POSTE_PRINT_FORMAT", "1011").strip() or "1011"
+POSTE_SERVICE_CODES = {"poste_express", "poste", "poste_italiane"}
 
 def _normalize_phone(v):
     """Converte +39... in 0039... come richiesto dal manuale Poste per l'internazionale."""
@@ -244,6 +246,67 @@ def build_declared(num_colli, peso_grammi_totale, h, l, w, extra_fields=None):
     return [collo] * num_colli
 
 
+
+
+def get_print_format():
+    return POSTE_PRINT_FORMAT
+
+
+def _text_matches_poste(value):
+    v = (value or "").strip().lower()
+    return v in POSTE_SERVICE_CODES or "poste" in v or "postal" in v or "italiane" in v
+
+
+def is_spedizione_poste(ordine):
+    shipping_lines = ordine.get("shipping_lines", []) or []
+    if not shipping_lines:
+        return False
+
+    for line in shipping_lines:
+        candidates = [
+            line.get("code"),
+            line.get("service_code"),
+            line.get("source"),
+            line.get("carrier_identifier"),
+            line.get("title"),
+            line.get("carrier_service_name"),
+        ]
+        if any(_text_matches_poste(value) for value in candidates):
+            return True
+
+    return False
+
+
+def ha_tracking_altro_corriere(ordine):
+    fulfillments = ordine.get("fulfillments", []) or []
+    for fulfillment in fulfillments:
+        company = (fulfillment.get("tracking_company") or "").strip().lower()
+        tracking_number = (fulfillment.get("tracking_number") or "").strip()
+        tracking_numbers = [str(x).strip() for x in (fulfillment.get("tracking_numbers") or []) if str(x).strip()]
+        tracking_urls = [str(x).strip() for x in (fulfillment.get("tracking_urls") or []) if str(x).strip()]
+
+        if company and not _text_matches_poste(company):
+            return True
+        if tracking_number and not company:
+            return True
+        if tracking_numbers and not company:
+            return True
+        if tracking_urls and not company:
+            return True
+
+    return False
+
+
+def log_shipping_debug(ordine):
+    try:
+        print("=== SHIPPING LINES ===")
+        print(json.dumps(ordine.get("shipping_lines", []) or [], ensure_ascii=False))
+        print("=== FULFILLMENTS ===")
+        print(json.dumps(ordine.get("fulfillments", []) or [], ensure_ascii=False))
+    except Exception as e:
+        print(f"Errore debug shipping: {e}")
+
+
 def crea_spedizione_italia(ordine, token, paperless=False):
     shipping = ordine.get("shipping_address", {})
     peso_grammi = sum(
@@ -261,7 +324,7 @@ def crea_spedizione_italia(ordine, token, paperless=False):
         "shipmentDate": time.strftime("%Y-%m-%dT%H:%M:%S.000+0000", time.gmtime()),
         "waybills": [{
             "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
-            "printFormat": "A4",
+            "printFormat": get_print_format(),
             "product": "APT000901",
             "data": {
                 "declared": build_declared(num_colli, peso_grammi, h, l, w),
@@ -368,7 +431,7 @@ def crea_spedizione_internazionale(ordine, token, paperless=False):
             "shipmentDate": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000+0000"),
             "waybills": [{
                 "clientReferenceId": str(ordine.get("order_number", ordine.get("id", "")))[:25],
-                "printFormat": "A4",
+                "printFormat": get_print_format(),
                 "product": "APT001013",
                 "data": {
                     "declared": build_declared(num_colli, total_weight, h, l, w,
@@ -704,17 +767,29 @@ def order_fulfilled():
     shipping = ordine.get("shipping_address", {}) or {}
     paese = shipping.get("country_code", "IT").upper()
 
+    log_shipping_debug(ordine)
+
     # Gestisce solo Italia e paesi nella lista Poste
     if paese != "IT" and paese not in PAESE_ZONA:
         print(f"Ordine #{order_number} - paese {paese} non gestito, manuale")
         return jsonify({"status": "ok", "message": "paese non gestito"}), 200
+
+    # Crea LDV Poste solo se il servizio scelto è Poste
+    if not is_spedizione_poste(ordine):
+        print(f"Ordine #{order_number} - spedizione non Poste, ignoro")
+        return jsonify({"status": "ok", "message": "spedizione non poste"}), 200
+
+    # Se c'è già tracking di altro corriere, evita doppie importazioni verso Poste
+    if ha_tracking_altro_corriere(ordine):
+        print(f"Ordine #{order_number} - tracking già presente per altro corriere, ignoro")
+        return jsonify({"status": "ok", "message": "other carrier tracking present"}), 200
 
     ordini_processati = carica_ordini()
     if ordine_id in ordini_processati:
         print(f"Ordine #{order_number} gia processato, ignoro duplicato")
         return jsonify({"status": "ok", "message": "already processed"}), 200
 
-    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - {paese}")
+    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - {paese} - printFormat={get_print_format()}")
 
     ldv = crea_spedizione_poste(ordine, paperless=False)
 
