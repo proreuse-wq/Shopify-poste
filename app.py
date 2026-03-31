@@ -13,8 +13,6 @@ app = Flask(__name__)
 POSTE_CLIENT_ID = os.environ.get("POSTE_CLIENT_ID", "")
 POSTE_SECRET_ID = os.environ.get("POSTE_SECRET_ID", "")
 POSTE_COST_CENTER = "CDC-00080197"
-POSTE_PRINT_FORMAT = os.environ.get("POSTE_PRINT_FORMAT", "1011").strip() or "1011"
-POSTE_SERVICE_CODES = {"poste_express", "poste", "poste_italiane"}
 
 def _normalize_phone(v):
     """Converte +39... in 0039... come richiesto dal manuale Poste per l'internazionale."""
@@ -23,7 +21,9 @@ def _normalize_phone(v):
         v = "00" + v[1:]
     return "".join(ch for ch in v if ch.isdigit())[:15]
 
-MITTENTE_PHONE = _normalize_phone(os.environ.get("MITTENTE_PHONE", "+393775435992"))
+MITTENTE_PHONE = _normalize_phone(os.environ.get("MITTENTE_PHONE", "+393711998531"))
+POSTE_PRINT_FORMAT = (os.environ.get("POSTE_PRINT_FORMAT", "1011") or "1011").strip()
+
 
 def _mittente_phone_normalized():
     return MITTENTE_PHONE
@@ -64,6 +64,45 @@ def salva_ordini(ordini):
             json.dump(list(ordini), f)
     except:
         pass
+
+def get_print_format():
+    fmt = (POSTE_PRINT_FORMAT or "1011").strip().upper()
+    return fmt if fmt in ("A4", "1011") else "1011"
+
+
+def is_spedizione_poste(ordine):
+    shipping_lines = ordine.get("shipping_lines", []) or []
+
+    for line in shipping_lines:
+        title = (line.get("title") or "").lower()
+        code = (line.get("code") or "").lower()
+        source = (line.get("source") or "").lower()
+
+        if code == "poste_express":
+            return True
+        if "poste" in title or "poste" in source:
+            return True
+
+    return False
+
+
+def ha_gia_fulfillment_altro_corriere(ordine):
+    fulfillments = ordine.get("fulfillments", []) or []
+
+    for f in fulfillments:
+        company = (f.get("tracking_company") or "").lower()
+        number = (f.get("tracking_number") or "").strip()
+        numbers = f.get("tracking_numbers", []) or []
+
+        if company and "poste" not in company:
+            return True
+        if number:
+            return True
+        if numbers:
+            return True
+
+    return False
+
 
 def clean_phone(value):
     """Normalizza il telefono al formato 00<prefisso><numero> richiesto da Poste
@@ -244,67 +283,6 @@ def build_declared(num_colli, peso_grammi_totale, h, l, w, extra_fields=None):
     if extra_fields:
         collo.update(extra_fields)
     return [collo] * num_colli
-
-
-
-
-def get_print_format():
-    return POSTE_PRINT_FORMAT
-
-
-def _text_matches_poste(value):
-    v = (value or "").strip().lower()
-    return v in POSTE_SERVICE_CODES or "poste" in v or "postal" in v or "italiane" in v
-
-
-def is_spedizione_poste(ordine):
-    shipping_lines = ordine.get("shipping_lines", []) or []
-    if not shipping_lines:
-        return False
-
-    for line in shipping_lines:
-        candidates = [
-            line.get("code"),
-            line.get("service_code"),
-            line.get("source"),
-            line.get("carrier_identifier"),
-            line.get("title"),
-            line.get("carrier_service_name"),
-        ]
-        if any(_text_matches_poste(value) for value in candidates):
-            return True
-
-    return False
-
-
-def ha_tracking_altro_corriere(ordine):
-    fulfillments = ordine.get("fulfillments", []) or []
-    for fulfillment in fulfillments:
-        company = (fulfillment.get("tracking_company") or "").strip().lower()
-        tracking_number = (fulfillment.get("tracking_number") or "").strip()
-        tracking_numbers = [str(x).strip() for x in (fulfillment.get("tracking_numbers") or []) if str(x).strip()]
-        tracking_urls = [str(x).strip() for x in (fulfillment.get("tracking_urls") or []) if str(x).strip()]
-
-        if company and not _text_matches_poste(company):
-            return True
-        if tracking_number and not company:
-            return True
-        if tracking_numbers and not company:
-            return True
-        if tracking_urls and not company:
-            return True
-
-    return False
-
-
-def log_shipping_debug(ordine):
-    try:
-        print("=== SHIPPING LINES ===")
-        print(json.dumps(ordine.get("shipping_lines", []) or [], ensure_ascii=False))
-        print("=== FULFILLMENTS ===")
-        print(json.dumps(ordine.get("fulfillments", []) or [], ensure_ascii=False))
-    except Exception as e:
-        print(f"Errore debug shipping: {e}")
 
 
 def crea_spedizione_italia(ordine, token, paperless=False):
@@ -767,29 +745,30 @@ def order_fulfilled():
     shipping = ordine.get("shipping_address", {}) or {}
     paese = shipping.get("country_code", "IT").upper()
 
-    log_shipping_debug(ordine)
-
     # Gestisce solo Italia e paesi nella lista Poste
     if paese != "IT" and paese not in PAESE_ZONA:
         print(f"Ordine #{order_number} - paese {paese} non gestito, manuale")
         return jsonify({"status": "ok", "message": "paese non gestito"}), 200
 
-    # Crea LDV Poste solo se il servizio scelto è Poste
+    print("=== SHIPPING LINES ===")
+    print(json.dumps(ordine.get("shipping_lines", []), indent=2, ensure_ascii=False))
+    print("=== FULFILLMENTS ===")
+    print(json.dumps(ordine.get("fulfillments", []), indent=2, ensure_ascii=False))
+
     if not is_spedizione_poste(ordine):
         print(f"Ordine #{order_number} - spedizione non Poste, ignoro")
         return jsonify({"status": "ok", "message": "spedizione non poste"}), 200
 
-    # Se c'è già tracking di altro corriere, evita doppie importazioni verso Poste
-    if ha_tracking_altro_corriere(ordine):
-        print(f"Ordine #{order_number} - tracking già presente per altro corriere, ignoro")
-        return jsonify({"status": "ok", "message": "other carrier tracking present"}), 200
+    if ha_gia_fulfillment_altro_corriere(ordine):
+        print(f"Ordine #{order_number} - già evaso con altro corriere, ignoro")
+        return jsonify({"status": "ok", "message": "already fulfilled by other carrier"}), 200
 
     ordini_processati = carica_ordini()
     if ordine_id in ordini_processati:
         print(f"Ordine #{order_number} gia processato, ignoro duplicato")
         return jsonify({"status": "ok", "message": "already processed"}), 200
 
-    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - {paese} - printFormat={get_print_format()}")
+    print(f"Ordine evaso: #{order_number} - {ordine.get('email', '')} - {paese}")
 
     ldv = crea_spedizione_poste(ordine, paperless=False)
 
