@@ -6,6 +6,7 @@ import json
 import math
 import re
 from datetime import datetime, timezone
+from apscheduler.schedulers.background import BackgroundScheduler
 
 app = Flask(__name__)
 
@@ -800,32 +801,6 @@ def tracking(ldv):
     return jsonify({"error": "Tracking non disponibile"}), 404
 
 
-@app.route("/nations", methods=["GET"])
-def nations():
-    """Debug: ritorna i paesi abilitati per APT001013 sul contratto."""
-    try:
-        token = get_poste_token()
-        headers = {
-            "POSTE_clientID": POSTE_CLIENT_ID,
-            "Authorization": token,
-            "Content-Type": "application/json"
-        }
-        url = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/international/nations"
-        resp = requests.post(url, json={}, headers=headers, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        # Filtra solo i paesi che supportano APT001013
-        countries = data.get("countries", [])
-        abilitati = [
-            {"iso2": c["iso2"], "iso4": c["iso4"], "name": c.get("name", "")}
-            for c in countries
-            if "APT001013" in c.get("products", []) and c.get("active")
-        ]
-        return jsonify({"totale": len(abilitati), "paesi": abilitati}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/sync-poste-status/<int:order_id>", methods=["POST"])
 def sync_poste_status(order_id):
     try:
@@ -852,6 +827,32 @@ def sync_poste_status_by_ldv(order_id, ldv):
     try:
         result = sincronizza_stato_poste_shopify(order_id, ldv)
         return jsonify({"status": "ok", **result}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/nations", methods=["GET"])
+def nations():
+    """Debug: ritorna i paesi abilitati per APT001013 sul contratto."""
+    try:
+        token = get_poste_token()
+        headers = {
+            "POSTE_clientID": POSTE_CLIENT_ID,
+            "Authorization": token,
+            "Content-Type": "application/json"
+        }
+        url = "https://apiw.gp.posteitaliane.it/gp/internet/postalandlogistics/parcel/international/nations"
+        resp = requests.post(url, json={}, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        # Filtra solo i paesi che supportano APT001013
+        countries = data.get("countries", [])
+        abilitati = [
+            {"iso2": c["iso2"], "iso4": c["iso4"], "name": c.get("name", "")}
+            for c in countries
+            if "APT001013" in c.get("products", []) and c.get("active")
+        ]
+        return jsonify({"totale": len(abilitati), "paesi": abilitati}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -937,6 +938,61 @@ def order_fulfilled():
         return jsonify({"status": "ok", "ldv": ldv}), 200
     else:
         return jsonify({"status": "error", "message": "Errore creazione spedizione"}), 500
+
+
+def job_sync_ordini_in_transito():
+    """Job periodico: aggiorna lo stato Poste su tutti gli ordini ancora in transito."""
+    TAG_DA_AGGIORNARE = {
+        "POSTE_IN_PREPARAZIONE",
+        "POSTE_ACCETTATO",
+        "POSTE_IN_TRANSITO",
+        "POSTE_IN_CONSEGNA",
+        "POSTE_TENTATA_CONSEGNA",
+        "POSTE_GIACENZA",
+    }
+    print("[SCHEDULER] Avvio sync stato spedizioni Poste...")
+    try:
+        headers = {
+            "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+            "Content-Type": "application/json"
+        }
+        # Cerca ordini con almeno uno dei tag da aggiornare
+        tag_query = " OR ".join(TAG_DA_AGGIORNARE)
+        url = (
+            f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
+            f"?status=open&limit=250&fields=id,name,tags,fulfillments"
+        )
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        ordini = resp.json().get("orders", [])
+
+        da_aggiornare = [
+            o for o in ordini
+            if any(t.strip() in TAG_DA_AGGIORNARE for t in (o.get("tags") or "").split(","))
+        ]
+
+        print(f"[SCHEDULER] Trovati {len(da_aggiornare)} ordini da aggiornare su {len(ordini)} aperti")
+
+        for ordine in da_aggiornare:
+            order_id = ordine["id"]
+            order_name = ordine.get("name", order_id)
+            ldv = trova_tracking_poste_order(ordine)
+            if not ldv:
+                print(f"[SCHEDULER] {order_name}: nessuna LDV trovata, salto")
+                continue
+            try:
+                sincronizza_stato_poste_shopify(order_id, ldv)
+            except Exception as e:
+                print(f"[SCHEDULER] {order_name}: errore sync -> {e}")
+            time.sleep(1)  # evita rate limit Poste
+
+    except Exception as e:
+        print(f"[SCHEDULER] Errore generale: {e}")
+
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(job_sync_ordini_in_transito, "interval", hours=1, id="sync_poste")
+scheduler.start()
 
 
 if __name__ == "__main__":
