@@ -1027,9 +1027,11 @@ def job_sync_ordini_in_transito():
             "X-Shopify-Access-Token": SHOPIFY_TOKEN,
             "Content-Type": "application/json"
         }
+        from datetime import timedelta
+        data_limite = (datetime.now(timezone.utc) - timedelta(days=15)).strftime("%Y-%m-%dT%H:%M:%SZ")
         url = (
             f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
-            f"?status=open&fulfillment_status=shipped&limit=250&fields=id,name,tags,fulfillments"
+            f"?status=any&fulfillment_status=shipped&created_at_min={data_limite}&limit=250&fields=id,name,tags,fulfillments"
         )
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
