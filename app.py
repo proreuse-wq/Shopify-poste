@@ -634,13 +634,20 @@ def get_poste_tracking_status(ldv):
     resp = requests.post(TRACKING_URL, json=payload, headers=headers, timeout=10)
     resp.raise_for_status()
     result = resp.json()
-    shipment = result.get("return", {}).get("messages", [{}])[0]
+    print(f"[TRACKING RAW] {json.dumps(result, ensure_ascii=False)}")
+    ret = result.get("return", {})
+    # La risposta può avere gli eventi in "shipment" (array root) o in "messages"
+    shipments = ret.get("shipment") or []
+    if not shipments:
+        # fallback: alcune versioni API mettono i dati dentro messages
+        shipments = ret.get("messages") or []
+    shipment = shipments[0] if shipments else {}
     tracking_events = shipment.get("tracking", []) or []
     if not tracking_events:
         return None
     last_event = tracking_events[-1] or {}
     return {
-        "description": (last_event.get("statusDescription") or "").strip(),
+        "description": (last_event.get("StatusDescription") or last_event.get("statusDescription") or "").strip(),
         "code": str(last_event.get("status") or last_event.get("statusCode") or "").strip(),
         "event": last_event,
         "raw": result,
