@@ -45,6 +45,18 @@ SCOPE_PRODUZIONE = "https://postemarketplace.onmicrosoft.com/d6a78063-5570-4a87-
 SHOPIFY_TOKEN = os.environ.get("SHOPIFY_TOKEN", "")
 SHOPIFY_SHOP = os.environ.get("SHOPIFY_SHOP", "")
 SHOPIFY_API_VERSION = "2026-01"
+POSTE_STATUS_TAG_PREFIX = "POSTE_"
+POSTE_STATUS_TAGS = {
+    "POSTE_IN_PREPARAZIONE",
+    "POSTE_ACCETTATO",
+    "POSTE_IN_TRANSITO",
+    "POSTE_IN_CONSEGNA",
+    "POSTE_CONSEGNATO",
+    "POSTE_TENTATA_CONSEGNA",
+    "POSTE_GIACENZA",
+    "POSTE_ECCEZIONE",
+    "POSTE_SCONOSCIUTO",
+}
 
 # ─── CACHE TOKEN ───────────────────────────────────────────────────────────────
 _token_cache = {"access_token": None, "expires_at": 0}
@@ -603,6 +615,132 @@ def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
 
 
 
+def get_poste_tracking_status(ldv):
+    """Legge lo stato più recente della spedizione da Poste."""
+    token = get_poste_token()
+    payload = {
+        "arg0": {
+            "shipmentsData": [{"waybillNumber": ldv, "lastTracingState": "S"}],
+            "statusDescription": "E",
+            "customerType": "DQ"
+        }
+    }
+    headers = {
+        "POSTE_clientID": POSTE_CLIENT_ID,
+        "Authorization": token,
+        "Content-Type": "application/json"
+    }
+    resp = requests.post(TRACKING_URL, json=payload, headers=headers, timeout=10)
+    resp.raise_for_status()
+    result = resp.json()
+    shipment = result.get("return", {}).get("messages", [{}])[0]
+    tracking_events = shipment.get("tracking", []) or []
+    if not tracking_events:
+        return None
+    last_event = tracking_events[-1] or {}
+    return {
+        "description": (last_event.get("statusDescription") or "").strip(),
+        "code": str(last_event.get("status") or last_event.get("statusCode") or "").strip(),
+        "event": last_event,
+        "raw": result,
+    }
+
+
+def map_poste_status_to_tag(description, code=""):
+    """Converte lo stato Poste in un tag Shopify leggibile e stabile."""
+    desc = (description or "").strip().lower()
+    code = (code or "").strip().upper()
+
+    patterns = [
+        (("consegn", "delivered"), "POSTE_CONSEGNATO"),
+        (("in consegna", "out for delivery"), "POSTE_IN_CONSEGNA"),
+        (("transit", "transito", "smist", "hub", "centro operativo"), "POSTE_IN_TRANSITO"),
+        (("presa in carico", "accettat", "spedizione accettata", "accettazione"), "POSTE_ACCETTATO"),
+        (("giacenza",), "POSTE_GIACENZA"),
+        (("tentata consegna", "destinatario assente", "mancata consegna", "failed delivery"), "POSTE_TENTATA_CONSEGNA"),
+        (("exception", "errore", "anomalia", "indirizzo errato", "rifiutato"), "POSTE_ECCEZIONE"),
+        (("preannunciata", "in preparazione", "label created"), "POSTE_IN_PREPARAZIONE"),
+    ]
+
+    for needles, tag in patterns:
+        if any(n in desc for n in needles):
+            return tag
+
+    code_map = {
+        "DELIVERED": "POSTE_CONSEGNATO",
+        "OUT_FOR_DELIVERY": "POSTE_IN_CONSEGNA",
+        "IN_TRANSIT": "POSTE_IN_TRANSITO",
+        "ACCEPTED": "POSTE_ACCETTATO",
+        "EXCEPTION": "POSTE_ECCEZIONE",
+    }
+    return code_map.get(code, "POSTE_SCONOSCIUTO")
+
+
+def update_order_tags_shopify(order_id, new_tag):
+    """Aggiorna i tag dell'ordine sostituendo l'eventuale vecchio stato Poste."""
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+        "Content-Type": "application/json"
+    }
+
+    url_get = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{order_id}.json?fields=id,tags,name"
+    resp_get = requests.get(url_get, headers=headers, timeout=10)
+    resp_get.raise_for_status()
+    order = resp_get.json().get("order", {})
+    current_tags_raw = order.get("tags", "") or ""
+    current_tags = [t.strip() for t in current_tags_raw.split(",") if t.strip()]
+
+    filtered = [t for t in current_tags if t not in POSTE_STATUS_TAGS and not t.startswith(POSTE_STATUS_TAG_PREFIX)]
+    filtered.append(new_tag)
+    merged_tags = ", ".join(dict.fromkeys(filtered))
+
+    url_put = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{order_id}.json"
+    payload = {"order": {"id": order_id, "tags": merged_tags}}
+    resp_put = requests.put(url_put, json=payload, headers=headers, timeout=10)
+    resp_put.raise_for_status()
+    return {
+        "order_name": order.get("name", ""),
+        "tags": merged_tags,
+    }
+
+
+def sincronizza_stato_poste_shopify(order_id, ldv):
+    """Legge lo stato Poste e lo salva in Shopify come tag custom ordine."""
+    if not ldv:
+        raise RuntimeError("LDV mancante")
+
+    tracking = get_poste_tracking_status(ldv)
+    if not tracking:
+        raise RuntimeError(f"Tracking Poste non disponibile per LDV {ldv}")
+
+    description = tracking.get("description", "")
+    code = tracking.get("code", "")
+    tag = map_poste_status_to_tag(description, code)
+    result = update_order_tags_shopify(order_id, tag)
+    print(f"[POSTE STATUS] Ordine {result.get('order_name', order_id)} -> {tag} ({description})")
+    return {
+        "ldv": ldv,
+        "description": description,
+        "code": code,
+        "tag": tag,
+        "order_name": result.get("order_name", ""),
+        "tags": result.get("tags", ""),
+    }
+
+
+def trova_tracking_poste_order(ordine):
+    """Recupera il tracking number Poste dall'ordine Shopify."""
+    fulfillments = ordine.get("fulfillments", []) or []
+    validi = [f for f in fulfillments if f.get("status") != "cancelled"]
+    validi.sort(key=lambda x: x.get("created_at", ""))
+    for f in reversed(validi):
+        company = (f.get("tracking_company") or "").lower()
+        tracking_number = (f.get("tracking_number") or "").strip()
+        if tracking_number and (not company or "poste" in company):
+            return tracking_number
+    return ""
+
+
 # ─── ROUTE ─────────────────────────────────────────────────────────────────────
 @app.route("/")
 def home():
@@ -647,32 +785,18 @@ def shipping_rates():
 
 @app.route("/tracking/<ldv>", methods=["GET"])
 def tracking(ldv):
-    stato = None
     try:
-        token = get_poste_token()
-        payload = {
-            "arg0": {
-                "shipmentsData": [{"waybillNumber": ldv, "lastTracingState": "S"}],
-                "statusDescription": "E", "customerType": "DQ"
-            }
-        }
-        headers = {
-            "POSTE_clientID": POSTE_CLIENT_ID,
-            "Authorization": token,
-            "Content-Type": "application/json"
-        }
-        resp = requests.post(TRACKING_URL, json=payload, headers=headers, timeout=10)
-        resp.raise_for_status()
-        result = resp.json()
-        shipment = result.get("return", {}).get("messages", [{}])[0]
-        tracking_events = shipment.get("tracking", [])
-        if tracking_events:
-            stato = tracking_events[-1].get("statusDescription", "")
+        tracking_info = get_poste_tracking_status(ldv)
+        if tracking_info and tracking_info.get("description"):
+            return jsonify({
+                "ldv": ldv,
+                "stato": tracking_info.get("description", ""),
+                "codice": tracking_info.get("code", ""),
+                "tag": map_poste_status_to_tag(tracking_info.get("description", ""), tracking_info.get("code", ""))
+            }), 200
     except Exception as e:
         print(f"Errore tracking: {e}")
 
-    if stato:
-        return jsonify({"ldv": ldv, "stato": stato}), 200
     return jsonify({"error": "Tracking non disponibile"}), 404
 
 
@@ -698,6 +822,36 @@ def nations():
             if "APT001013" in c.get("products", []) and c.get("active")
         ]
         return jsonify({"totale": len(abilitati), "paesi": abilitati}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sync-poste-status/<int:order_id>", methods=["POST"])
+def sync_poste_status(order_id):
+    try:
+        headers = {
+            "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+            "Content-Type": "application/json"
+        }
+        url = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{order_id}.json?fields=id,name,fulfillments"
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        ordine = resp.json().get("order", {})
+        ldv = trova_tracking_poste_order(ordine)
+        if not ldv:
+            return jsonify({"error": "Tracking Poste non trovato nell'ordine"}), 404
+
+        result = sincronizza_stato_poste_shopify(order_id, ldv)
+        return jsonify({"status": "ok", **result}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/sync-poste-status-by-ldv/<int:order_id>/<ldv>", methods=["POST"])
+def sync_poste_status_by_ldv(order_id, ldv):
+    try:
+        result = sincronizza_stato_poste_shopify(order_id, ldv)
+        return jsonify({"status": "ok", **result}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -776,6 +930,10 @@ def order_fulfilled():
         ordini_processati.add(ordine_id)
         salva_ordini(ordini_processati)
         aggiorna_tracking_shopify(ordine_id, order_number, ldv)
+        try:
+            sincronizza_stato_poste_shopify(ordine_id, ldv)
+        except Exception as e:
+            print(f"[POSTE STATUS] Sync iniziale non riuscita per ordine #{order_number}: {e}")
         return jsonify({"status": "ok", "ldv": ldv}), 200
     else:
         return jsonify({"status": "error", "message": "Errore creazione spedizione"}), 500
