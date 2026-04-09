@@ -621,7 +621,7 @@ def get_poste_tracking_status(ldv):
     token = get_poste_token()
     payload = {
         "arg0": {
-            "shipmentsData": [{"waybillNumber": ldv, "lastTracingState": "S"}],
+            "shipmentsData": [{"waybillNumber": ldv, "lastTracingState": "N"}],
             "statusDescription": "E",
             "customerType": "DQ"
         }
