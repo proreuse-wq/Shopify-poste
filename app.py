@@ -645,7 +645,7 @@ def get_poste_tracking_status(ldv):
     tracking_events = shipment.get("tracking", []) or []
     if not tracking_events:
         return None
-    last_event = tracking_events[-1] or {}
+    last_event = tracking_events[0] or {}
     return {
         "description": (last_event.get("StatusDescription") or last_event.get("statusDescription") or "").strip(),
         "code": str(last_event.get("status") or last_event.get("statusCode") or "").strip(),
