@@ -712,8 +712,63 @@ def update_order_tags_shopify(order_id, new_tag):
     }
 
 
+TAG_TO_FULFILLMENT_EVENT = {
+    "POSTE_IN_PREPARAZIONE": "label_printed",
+    "POSTE_ACCETTATO":       "confirmed",
+    "POSTE_IN_TRANSITO":     "in_transit",
+    "POSTE_IN_CONSEGNA":     "out_for_delivery",
+    "POSTE_CONSEGNATO":      "delivered",
+    "POSTE_TENTATA_CONSEGNA":"attempted_delivery",
+    "POSTE_GIACENZA":        "ready_for_pickup",
+    "POSTE_ECCEZIONE":       "failure",
+    "POSTE_SCONOSCIUTO":     "in_transit",
+}
+
+
+def trova_fulfillment_id_poste(order_id):
+    """Recupera l'ID del fulfillment Poste dall'ordine Shopify."""
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+        "Content-Type": "application/json"
+    }
+    url = f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders/{order_id}/fulfillments.json"
+    resp = requests.get(url, headers=headers, timeout=10)
+    resp.raise_for_status()
+    fulfillments = resp.json().get("fulfillments", []) or []
+    validi = [f for f in fulfillments if f.get("status") != "cancelled"]
+    validi.sort(key=lambda x: x.get("created_at", ""))
+    for f in reversed(validi):
+        company = (f.get("tracking_company") or "").lower()
+        tracking_number = (f.get("tracking_number") or "").strip()
+        if tracking_number and (not company or "poste" in company):
+            return f["id"]
+    return None
+
+
+def crea_fulfillment_event(order_id, fulfillment_id, event_status, message=""):
+    """Crea un FulfillmentEvent su Shopify per aggiornare lo stato della consegna."""
+    headers = {
+        "X-Shopify-Access-Token": SHOPIFY_TOKEN,
+        "Content-Type": "application/json"
+    }
+    url = (
+        f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}"
+        f"/orders/{order_id}/fulfillments/{fulfillment_id}/events.json"
+    )
+    payload = {
+        "event": {
+            "status": event_status,
+            "message": message or None,
+            "happened_at": datetime.now(timezone.utc).isoformat(),
+        }
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json().get("fulfillment_event", {})
+
+
 def sincronizza_stato_poste_shopify(order_id, ldv):
-    """Legge lo stato Poste e lo salva in Shopify come tag custom ordine."""
+    """Legge lo stato Poste e aggiorna il FulfillmentEvent su Shopify."""
     if not ldv:
         raise RuntimeError("LDV mancante")
 
@@ -724,15 +779,31 @@ def sincronizza_stato_poste_shopify(order_id, ldv):
     description = tracking.get("description", "")
     code = tracking.get("code", "")
     tag = map_poste_status_to_tag(description, code)
-    result = update_order_tags_shopify(order_id, tag)
-    print(f"[POSTE STATUS] Ordine {result.get('order_name', order_id)} -> {tag} ({description})")
+    event_status = TAG_TO_FULFILLMENT_EVENT.get(tag, "in_transit")
+
+    # Aggiorna anche i tag (utile per filtrare in Shopify)
+    try:
+        update_order_tags_shopify(order_id, tag)
+    except Exception as e:
+        print(f"[POSTE STATUS] Aggiornamento tag fallito (non bloccante): {e}")
+
+    # Crea il FulfillmentEvent per aggiornare lo stato della consegna
+    fulfillment_id = trova_fulfillment_id_poste(order_id)
+    if fulfillment_id:
+        try:
+            crea_fulfillment_event(order_id, fulfillment_id, event_status, description)
+            print(f"[POSTE STATUS] Ordine {order_id} -> {event_status} ({description})")
+        except Exception as e:
+            print(f"[POSTE STATUS] FulfillmentEvent fallito: {e}")
+    else:
+        print(f"[POSTE STATUS] Fulfillment Poste non trovato per ordine {order_id}")
+
     return {
         "ldv": ldv,
         "description": description,
         "code": code,
         "tag": tag,
-        "order_name": result.get("order_name", ""),
-        "tags": result.get("tags", ""),
+        "event_status": event_status,
     }
 
 
