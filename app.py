@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 import requests
 import time
 import os
@@ -521,7 +521,7 @@ def aggiorna_tracking_shopify(ordine_id, order_number, ldv):
         tracking_info = {
             "company": "Poste Italiane",
             "number": ldv,
-            "url": f"https://www.poste.it/cerca/index.html#!/cerca/ricerca-spedizioni/{ldv}"
+            "url": f"https://shopify-poste-production.up.railway.app/tracking-redirect/{ldv}"
         }
 
         print(f"[TRACKING] Ordine #{order_number} - avvio aggiornamento tracking LDV {ldv}")
@@ -860,6 +860,12 @@ def shipping_rates():
             "max_delivery_date": None
         }]
     }), 200
+
+
+@app.route("/tracking-redirect/<ldv>", methods=["GET"])
+def tracking_redirect(ldv):
+    url = f"https://www.poste.it/cerca/index.html#/risultati-spedizioni/{ldv}"
+    return redirect(url, code=302)
 
 
 @app.route("/tracking/<ldv>", methods=["GET"])
