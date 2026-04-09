@@ -1019,50 +1019,42 @@ def order_fulfilled():
 
 
 def job_sync_ordini_in_transito():
-    """Job periodico: aggiorna lo stato Poste su tutti gli ordini ancora in transito."""
-    TAG_DA_AGGIORNARE = {
-        "POSTE_IN_PREPARAZIONE",
-        "POSTE_ACCETTATO",
-        "POSTE_IN_TRANSITO",
-        "POSTE_IN_CONSEGNA",
-        "POSTE_TENTATA_CONSEGNA",
-        "POSTE_GIACENZA",
-    }
+    """Job periodico: aggiorna lo stato Poste su tutti gli ordini con tracciamento Poste non ancora consegnati."""
+    TAG_GIA_FINITI = {"POSTE_CONSEGNATO", "POSTE_ECCEZIONE"}
     print("[SCHEDULER] Avvio sync stato spedizioni Poste...")
     try:
         headers = {
             "X-Shopify-Access-Token": SHOPIFY_TOKEN,
             "Content-Type": "application/json"
         }
-        # Cerca ordini con almeno uno dei tag da aggiornare
-        tag_query = " OR ".join(TAG_DA_AGGIORNARE)
         url = (
             f"https://{SHOPIFY_SHOP}/admin/api/{SHOPIFY_API_VERSION}/orders.json"
-            f"?status=open&limit=250&fields=id,name,tags,fulfillments"
+            f"?status=open&fulfillment_status=shipped&limit=250&fields=id,name,tags,fulfillments"
         )
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
         ordini = resp.json().get("orders", [])
 
-        da_aggiornare = [
-            o for o in ordini
-            if any(t.strip() in TAG_DA_AGGIORNARE for t in (o.get("tags") or "").split(","))
-        ]
+        # Filtra: ha LDV Poste e non è già consegnato/eccezione
+        da_aggiornare = []
+        for o in ordini:
+            tags = {t.strip() for t in (o.get("tags") or "").split(",")}
+            if tags & TAG_GIA_FINITI:
+                continue
+            if trova_tracking_poste_order(o):
+                da_aggiornare.append(o)
 
-        print(f"[SCHEDULER] Trovati {len(da_aggiornare)} ordini da aggiornare su {len(ordini)} aperti")
+        print(f"[SCHEDULER] Trovati {len(da_aggiornare)} ordini da aggiornare su {len(ordini)} spediti")
 
         for ordine in da_aggiornare:
             order_id = ordine["id"]
             order_name = ordine.get("name", order_id)
             ldv = trova_tracking_poste_order(ordine)
-            if not ldv:
-                print(f"[SCHEDULER] {order_name}: nessuna LDV trovata, salto")
-                continue
             try:
                 sincronizza_stato_poste_shopify(order_id, ldv)
             except Exception as e:
                 print(f"[SCHEDULER] {order_name}: errore sync -> {e}")
-            time.sleep(1)  # evita rate limit Poste
+            time.sleep(1)
 
     except Exception as e:
         print(f"[SCHEDULER] Errore generale: {e}")
