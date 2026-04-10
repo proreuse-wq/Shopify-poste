@@ -649,19 +649,32 @@ def get_poste_tracking_status(ldv):
     return {
         "description": (last_event.get("StatusDescription") or last_event.get("statusDescription") or "").strip(),
         "code": str(last_event.get("status") or last_event.get("statusCode") or "").strip(),
+        "phase": (last_event.get("phase") or "").strip().upper(),
         "event": last_event,
         "raw": result,
     }
 
 
-def map_poste_status_to_tag(description, code=""):
+def map_poste_status_to_tag(description, code="", phase=""):
     """Converte lo stato Poste in un tag Shopify leggibile e stabile."""
     desc = (description or "").strip().lower()
     code = (code or "").strip().upper()
+    phase = (phase or "").strip().upper()
+
+    # Usa la phase se disponibile — è più affidabile della descrizione testuale
+    phase_map = {
+        "CONSEGNATA": "POSTE_CONSEGNATO",
+        "IN CONSEGNA": "POSTE_IN_CONSEGNA",
+        "IN TRANSITO": "POSTE_IN_TRANSITO",
+        "PRESA IN CARICO": "POSTE_ACCETTATO",
+        "GIACENZA": "POSTE_GIACENZA",
+    }
+    if phase in phase_map:
+        return phase_map[phase]
 
     patterns = [
-        (("consegn", "delivered"), "POSTE_CONSEGNATO"),
         (("in consegna", "out for delivery"), "POSTE_IN_CONSEGNA"),
+        (("è stata consegnata", "spedizione consegnata", "delivered"), "POSTE_CONSEGNATO"),
         (("transit", "transito", "smist", "hub", "centro operativo"), "POSTE_IN_TRANSITO"),
         (("presa in carico", "accettat", "spedizione accettata", "accettazione"), "POSTE_ACCETTATO"),
         (("giacenza",), "POSTE_GIACENZA"),
@@ -778,7 +791,7 @@ def sincronizza_stato_poste_shopify(order_id, ldv):
 
     description = tracking.get("description", "")
     code = tracking.get("code", "")
-    tag = map_poste_status_to_tag(description, code)
+    tag = map_poste_status_to_tag(description, code, tracking.get("phase", ""))
     event_status = TAG_TO_FULFILLMENT_EVENT.get(tag, "in_transit")
 
     # Aggiorna anche i tag (utile per filtrare in Shopify)
@@ -877,7 +890,7 @@ def tracking(ldv):
                 "ldv": ldv,
                 "stato": tracking_info.get("description", ""),
                 "codice": tracking_info.get("code", ""),
-                "tag": map_poste_status_to_tag(tracking_info.get("description", ""), tracking_info.get("code", ""))
+                "tag": map_poste_status_to_tag(tracking_info.get("description", ""), tracking_info.get("code", ""), tracking_info.get("phase", ""))
             }), 200
     except Exception as e:
         print(f"Errore tracking: {e}")
